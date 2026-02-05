@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  # Redis for caching (optional but recommended)
+  redis:
+    image: redis:7-alpine
+    container_name: multi-agent-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Multi-Agent Orchestrator
+  orchestrator:
+    build: .
+    container_name: multi-agent-orchestrator
+    env_file:
+      - .env
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_ENABLED=true
+    volumes:
+      - ./data:/app/data
+      - ./configs:/app/configs
+      - ${RAG_WATCH_PATH:-./documents}:/app/documents
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"  # For future FastAPI endpoint
+    stdin_open: true
+    tty: true
+
+volumes:
+  redis-data:
+    driver: local
