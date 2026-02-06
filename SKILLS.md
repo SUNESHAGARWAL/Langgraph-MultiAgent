@@ -1,69 +1,106 @@
 # Agent Skills and Capabilities
 
-This document describes the skills and capabilities of each agent in the Multi-Agent Orchestrator system.
+**Version:** 2.0.0
+**Date:** 2026-02-06
+**Architecture:** Multi-Agent Supervisor Pattern
+
+This document describes the skills and capabilities of each agent in the Multi-Agent Supervisor system.
 
 ---
 
-## 🧠 Orchestrator Agent
+## 🧠 Supervisor Agent (Orchestrator)
 
-**Purpose:** Main coordinator and decision maker
+**Purpose:** Central coordinator that routes to specialist agents
 
-### Skills
+**File:** `src/agent.py::create_supervisor_agent()`
+
+### Core Skills
 
 | Skill | Description | Input | Output |
 |-------|-------------|-------|--------|
-| **analyze_question** | Understand user intent and required resources | Question string | Analysis dict |
-| **create_plan** | Generate execution plan with steps | Question + context | Plan object |
-| **route_to_agent** | Route task to appropriate agent | Task description | Agent selection |
-| **replan_on_failure** | Create new plan when previous fails | Failed plan + execution log | New plan |
-| **detect_ambiguity** | Identify unclear or ambiguous queries | Question | Boolean + confidence |
-| **coordinate_agents** | Manage multi-agent workflows | Plan | Execution results |
+| **analyze_question** | Understand user intent | Question string | Analysis |
+| **route_to_specialist** | Select appropriate agent | Analysis | Agent name |
+| **coordinate_flow** | Manage multi-step workflows | State | Updated state |
+| **replan_on_failure** | Create new approach when stuck | Execution log | New routing decision |
+| **iteration_tracking** | Prevent infinite loops | State | Iteration count |
+| **human_escalation** | Ask for help when stuck | State | Human request |
+
+### Routing Decisions
+
+```
+For data/SQL queries → SQL_Specialist
+For document/policy questions → document_search
+If unsure or need clarification → HUMAN
+When complete answer ready → FINISH (→ synthesis)
+```
 
 ### Example Use Cases
 
-1. **Simple Query:** "What were sales last month?"
-   - Route directly to Genie
+**1. Simple SQL Query**
+```
+User: "What were sales last quarter?"
+Supervisor: Routes to SQL_Specialist → FINISH → Synthesis
+Iterations: 2
+```
 
-2. **Complex Query:** "Compare sales trends with customer satisfaction scores from uploaded reports"
-   - Step 1: RAG agent retrieves customer satisfaction from documents
-   - Step 2: Genie queries sales data
-   - Step 3: Synthesis combines both
+**2. Multi-Agent Coordination**
+```
+User: "Compare Q4 sales against policy targets"
+Supervisor:
+  → SQL_Specialist (get sales)
+  → document_search (get targets)
+  → FINISH → Synthesis
+Iterations: 3
+```
 
-3. **Ambiguous Query:** "Show me the data"
-   - Triggers human-in-loop for clarification
+**3. Replanning**
+```
+User: "What's our customer churn rate?"
+Supervisor:
+  Iteration 1: SQL_Specialist (fails - no churn_rate column)
+  Iteration 2: Replan → SQL_Specialist (calculate from activity)
+  Iteration 3: FINISH → Synthesis
+```
+
+**4. Human Escalation**
+```
+User: "Show me the data"
+Supervisor: Ambiguous → Routes to HUMAN
+```
 
 ---
 
-## 📊 Genie Agent
+## 📊 SQL Specialist (Genie Agent)
 
-**Purpose:** Execute SQL queries via Databricks Genie
+**Purpose:** Execute SQL queries on Unity Catalog via Databricks Genie
 
-### Skills
+**File:** `src/agent.py::create_genie_agent()`
+
+### Core Skills
 
 | Skill | Description | Input | Output |
 |-------|-------------|-------|--------|
-| **natural_language_to_sql** | Convert NL question to SQL | NL question | SQL query + results |
-| **query_unity_catalog** | Query tables in Unity Catalog | SQL/NL | Data rows |
-| **semantic_caching** | Cache and retrieve similar queries | Query | Cached results (if hit) |
-| **result_formatting** | Format query results | Raw data | Structured response |
-| **retry_on_failure** | Exponential backoff retry | Failed query | Result or error |
+| **natural_language_to_sql** | Convert question to SQL | NL question | SQL + results |
+| **query_execution** | Execute on Unity Catalog | SQL | Data rows |
+| **result_formatting** | Format as markdown table | Raw data | Markdown string |
+| **context_understanding** | Use Genie Space context | Question + tables | Optimized query |
 
 ### Supported Query Types
 
-- ✅ Aggregations (SUM, AVG, COUNT)
-- ✅ Filters (WHERE conditions)
-- ✅ Joins (multi-table queries)
-- ✅ Top-N queries (ORDER BY + LIMIT)
-- ✅ Time-series queries (date ranges)
-- ✅ Group by analytics
+- ✅ **Aggregations:** SUM, AVG, COUNT, MIN, MAX
+- ✅ **Filtering:** WHERE conditions, date ranges
+- ✅ **Grouping:** GROUP BY with multiple dimensions
+- ✅ **Sorting:** ORDER BY, LIMIT (Top-N)
+- ✅ **Joins:** Multi-table queries (if configured in Genie Space)
+- ✅ **Time-series:** Date/time analysis, trends
 
 ### Example Queries
 
-```
+```sql
 "What were our top 5 products by revenue last quarter?"
 → SELECT product_name, SUM(revenue) as total_revenue
   FROM sales_data
-  WHERE quarter = 'Q4'
+  WHERE quarter = 'Q4 2025'
   GROUP BY product_name
   ORDER BY total_revenue DESC
   LIMIT 5
@@ -72,324 +109,476 @@ This document describes the skills and capabilities of each agent in the Multi-A
 → SELECT region, AVG(lifetime_value) as avg_ltv
   FROM customer_data
   GROUP BY region
+  ORDER BY avg_ltv DESC
+
+"What's the monthly revenue trend for 2025?"
+→ SELECT DATE_TRUNC('month', order_date) as month,
+         SUM(revenue) as monthly_revenue
+  FROM sales_data
+  WHERE YEAR(order_date) = 2025
+  GROUP BY month
+  ORDER BY month
 ```
 
----
+### Configuration
 
-## 📋 Table Understanding Agent
+```python
+GenieAgent(
+    genie_space_id=config.databricks.genie_space_id,
+    genie_agent_name="SQL_Specialist",
+    client=workspace_client,  # WorkspaceClient for auth
+    return_pandas=False,      # Returns markdown tables
+)
+```
 
-**Purpose:** Discover and understand Unity Catalog tables
-
-### Skills
-
-| Skill | Description | Input | Output |
-|-------|-------------|-------|--------|
-| **analyze_table_schema** | Extract table structure | Table name | Columns, types, comments |
-| **compute_statistics** | Calculate table statistics | Table name | Row count, distinct values |
-| **sample_data** | Get representative rows | Table name | Sample rows |
-| **semantic_search** | Find relevant tables | NL description | Matching tables |
-| **generate_description** | Create human-readable table summary | Table metadata | Description string |
-| **suggest_tables** | Recommend tables for query | User question | Ranked table list |
-
-### Example Use Cases
-
-1. **Table Discovery:** "What tables contain customer information?"
-   - Searches vector store for "customer"
-   - Returns: customer_data, customer_orders, customer_feedback
-
-2. **Column Discovery:** "Which table has email addresses?"
-   - Analyzes all table schemas
-   - Returns: customer_data (email column)
-
-3. **Data Preview:** "What does the sales_data table look like?"
-   - Returns: schema + sample rows + statistics
+**Available Tables:** Configured via `UNITY_CATALOG_TABLES` env var
 
 ---
 
-## 📄 RAG Agent
+## 📄 Document Search Specialist (RAG Agent)
 
-**Purpose:** Process documents and provide context
+**Purpose:** Retrieve relevant information from uploaded documents
 
-### Skills
+**File:** `src/agent.py::create_rag_agent()`
+
+### Core Skills
 
 | Skill | Description | Input | Output |
 |-------|-------------|-------|--------|
-| **auto_process_documents** | Monitor and process new files | File path | Processed chunks |
-| **parse_documents** | Extract text from various formats | File (PDF/DOCX/CSV) | Text content |
-| **chunk_text** | Split text into semantic chunks | Text | Chunks |
-| **embed_chunks** | Generate embeddings | Text chunks | Vectors |
 | **semantic_search** | Find relevant document chunks | Query | Top-K chunks |
-| **summarize_documents** | Create document summaries | Document | Summary |
+| **document_parsing** | Extract text from files | File path | Text content |
+| **text_chunking** | Split into semantic chunks | Text | Chunks (1000 chars) |
+| **embedding_generation** | Generate vector embeddings | Text | Vectors |
+| **similarity_matching** | Match query to documents | Query + threshold | Relevant chunks |
 
 ### Supported File Types
 
-| Format | Extension | Support Level |
-|--------|-----------|---------------|
-| PDF | `.pdf` | ✅ Full |
-| Word | `.docx`, `.doc` | ✅ Full |
-| Excel | `.xlsx`, `.xls` | ✅ Full (converts to text) |
-| PowerPoint | `.pptx`, `.ppt` | ✅ Full |
-| CSV | `.csv` | ✅ Full |
-| Text | `.txt` | ✅ Full |
+| Format | Extension | Status |
+|--------|-----------|--------|
+| **PDF** | `.pdf` | ✅ Full support |
+| **Word** | `.docx` | ✅ Full support |
+| **Text** | `.txt` | ✅ Full support |
+| **CSV** | `.csv` | ✅ Full support |
+| **Excel** | `.xlsx` | ✅ Full support |
+| **PowerPoint** | `.pptx` | ✅ Full support |
+
+### Document Processing
+
+**Setup:**
+```bash
+# Add documents to directory
+mkdir -p data/documents
+cp policies/*.pdf data/documents/
+cp reports/*.docx data/documents/
+
+# Restart agent to load documents
+python src/main.py
+```
+
+**Processing Flow:**
+```
+1. Load documents from data/documents/
+2. Split into chunks (1000 chars, 200 overlap)
+3. Generate embeddings (Azure OpenAI)
+4. Store in FAISS vector store
+5. Ready for retrieval (top-5 most relevant)
+```
 
 ### Example Use Cases
 
-1. **Policy Question:** "What's our refund policy?"
-   - Searches through uploaded policy documents
-   - Returns: Relevant sections from refund_policy.pdf
+**1. Policy Question**
+```
+User: "What's our refund policy?"
+RAG: Searches documents → Returns relevant sections
+Output: "According to the refund_policy.pdf, customers have 30 days..."
+```
 
-2. **Report Analysis:** "What does the Q4 report say about churn?"
-   - Searches Q4_report.docx
-   - Returns: Churn analysis section
+**2. Report Analysis**
+```
+User: "What does the Q4 report say about churn?"
+RAG: Searches Q4_report.docx → Returns churn analysis section
+Output: "The Q4 2025 report indicates churn rate of 12.5%..."
+```
 
-3. **Data Context:** "Explain the columns in this CSV"
-   - Reads uploaded data_dictionary.csv
-   - Returns: Column descriptions
+**3. Combined Query**
+```
+User: "Compare our sales to industry benchmarks"
+Supervisor:
+  → SQL_Specialist (get our sales)
+  → document_search (find industry benchmark doc)
+  → Synthesis (compare both)
+```
+
+### Configuration
+
+```python
+# Chunking
+chunk_size=1000
+chunk_overlap=200
+
+# Retrieval
+top_k=5
+similarity_threshold=0.7
+
+# Embedding
+model=text-embedding-ada-002 (Azure OpenAI)
+```
 
 ---
 
 ## ✨ Synthesis Agent
 
-**Purpose:** Combine results into coherent answers
+**Purpose:** Combine results from multiple specialists into coherent final answer
 
-### Skills
+**File:** `src/agent.py::create_synthesis_agent()`
+
+### Core Skills
 
 | Skill | Description | Input | Output |
 |-------|-------------|-------|--------|
-| **combine_sources** | Merge data from multiple agents | Agent results | Unified context |
+| **combine_sources** | Merge data from specialists | Agent results | Unified context |
 | **format_answer** | Create human-readable response | Raw data | Formatted answer |
-| **add_context** | Enrich answer with background | Answer + metadata | Enhanced answer |
-| **cite_sources** | Add source attribution | Answer + sources | Answer with citations |
-| **highlight_insights** | Extract key takeaways | Data | Key insights |
+| **add_citations** | Include source attribution | Answer | Answer + sources |
+| **highlight_insights** | Extract key findings | Data | Key insights |
+| **markdown_formatting** | Structure response nicely | Text | Formatted markdown |
 
 ### Synthesis Patterns
 
-**Pattern 1: Data + Context**
+**Pattern 1: Single Source (SQL)**
 ```
 Input:
-- Genie: Sales data (numbers)
-- RAG: Industry trends document
+- SQL_Specialist: "Top 5 products: A ($1.2M), B ($980K)..."
 
 Output:
-"Your sales of $1.2M represent a 15% increase. According to
-the industry trends report, the average growth rate is 8%,
-meaning you're outperforming the market."
+"Based on the sales data, here are the top 5 products by revenue:
+
+1. Product A - $1.2M
+2. Product B - $980K
+3. Product C - $850K
+4. Product D - $720K
+5. Product E - $680K
+
+Sources: Unity Catalog (sales_data table)"
 ```
 
-**Pattern 2: Multi-Table Join**
+**Pattern 2: SQL + Documents**
 ```
 Input:
-- Genie Query 1: Customer data
-- Genie Query 2: Order data
+- SQL_Specialist: "Q4 revenue: $2.3M"
+- document_search: "Policy target: $2.0M"
 
 Output:
-"Based on the customer and order tables, here are the top
-customers by total order value..."
+"**Q4 2025 Performance Analysis:**
+
+Revenue: $2.3M
+Target: $2.0M (from company policy)
+Performance: Exceeded target by 15% ($300K above target)
+
+**Sources:**
+- Unity Catalog: sales_data table
+- Document: Q4_2025_Sales_Policy.pdf"
 ```
 
-**Pattern 3: Explanation + Data**
+**Pattern 3: Multi-Step SQL**
 ```
 Input:
-- Table Understanding: Schema info
-- Genie: Query results
+- SQL_Specialist (1): "Customer count: 1,500"
+- SQL_Specialist (2): "Average order value: $450"
 
 Output:
-"The sales_data table contains transactions from 2020-2024.
-Here are last month's results: [data]"
+"**Customer Analytics:**
+
+Total Customers: 1,500
+Average Order Value: $450
+Estimated Total Revenue: $675K
+
+Sources: Unity Catalog (customer_data, order_data)"
+```
+
+### Configuration
+
+```python
+# Lower temperature for consistent synthesis
+temperature=0.3
+
+# System prompt emphasizes:
+# - Combining results
+# - Citing sources
+# - Markdown formatting
+# - Being concise but complete
 ```
 
 ---
 
 ## 👤 Human-in-Loop Agent
 
-**Purpose:** Handle clarifications and confirmations
+**Purpose:** Handle clarifications when system is stuck
 
-### Skills
+**File:** `src/agent.py::create_human_node()`
+
+### Core Skills
 
 | Skill | Description | Input | Output |
 |-------|-------------|-------|--------|
 | **ask_clarification** | Request more information | Question | User response |
-| **ask_confirmation** | Confirm before action | Action description | Boolean |
-| **provide_suggestions** | Offer choices to user | Suggestion list | User selection |
-| **notify_user** | Display information | Message | Acknowledgment |
-| **present_choices** | Multiple choice question | Options list | Selected option |
+| **notify_user** | Display message | Message | Acknowledgment |
+| **pause_execution** | Wait for human input | State | Pause |
 
-### Interaction Patterns
+### Trigger Conditions
 
-**Pattern 1: Ambiguous Query**
+**1. Ambiguous Query**
 ```
 User: "Show me the data"
-
-System: "I have access to several tables:
-1. sales_data - Product sales by quarter
-2. customer_data - Customer demographics
-3. product_data - Product catalog
-
-Which would you like to see?"
-
-User: "Sales data"
-
-System: [Proceeds with sales_data query]
+Supervisor: → HUMAN (unclear which data)
 ```
 
-**Pattern 2: Confirmation**
+**2. Iteration Limit**
 ```
-User: "Delete all records from last year"
-
-System: "⚠️ This will delete approximately 10,000 records
-from the sales_data table. This action cannot be undone.
-
-Proceed? (yes/no)"
-
-User: "no"
-
-System: "Action cancelled."
+After 5 iterations without success → HUMAN
+"I've tried multiple approaches but need your help..."
 ```
 
-**Pattern 3: Progressive Refinement**
+**3. Explicit Routing**
 ```
-User: "Show me customer trends"
-
-System: "I can analyze customer trends by:
-1. Revenue
-2. Order frequency
-3. Product categories
-4. Geographic region
-
-What would you like to focus on?"
-
-User: "Revenue"
-
-System: [Analyzes customer revenue trends]
+Supervisor determines query is unclear → HUMAN
 ```
 
----
+### Production Customization
 
-## 💾 Supporting Services
+Replace CLI input with real systems:
 
-### Smart Cache Service
-
-**Skills:**
-- Semantic similarity matching
-- TTL-based expiration
-- Vector-based search
-- Tag-based filtering
-
-### Vector Store Service
-
-**Skills:**
-- FAISS indexing
-- Similarity search
-- Persistence to disk
-- Multi-index management
-
-### MLflow Tracker
-
-**Skills:**
-- Experiment tracking
-- Metric logging
-- Artifact storage
-- Run comparison
-
-### File Monitor Service
-
-**Skills:**
-- Real-time file watching
-- Pattern matching
-- Event handling
-- Batch processing
-
----
-
-## 🔄 Skill Combinations
-
-### Common Workflows
-
-**Workflow 1: New User Query**
-```
-1. Orchestrator: analyze_question
-2. Orchestrator: create_plan
-3. Table Understanding: search_tables
-4. Genie: natural_language_to_sql
-5. Synthesis: combine_sources
-6. Synthesis: format_answer
+**Option 1: Webhook**
+```python
+response = requests.post(
+    "https://api.example.com/ask-human",
+    json={"question": "...", "thread_id": "..."}
+)
+clarification = response.json()["answer"]
 ```
 
-**Workflow 2: Document-Enhanced Query**
-```
-1. Orchestrator: analyze_question
-2. RAG: semantic_search (find relevant docs)
-3. Genie: query_unity_catalog
-4. Synthesis: combine_sources (data + document context)
-5. Synthesis: format_answer
+**Option 2: Queue System**
+```python
+queue.publish("human-input-needed", {"question": "..."})
+clarification = queue.wait_for_response(timeout=300)
 ```
 
-**Workflow 3: Error Recovery**
-```
-1. Genie: query fails (table not found)
-2. Orchestrator: detect_error
-3. Orchestrator: replan_on_failure
-4. Table Understanding: search_tables
-5. Genie: retry with correct table
-6. Success
+**Option 3: Slack/Teams**
+```python
+slack.send_message(
+    channel="agent-questions",
+    text="Need clarification: ..."
+)
+clarification = slack.wait_for_reply(timeout=300)
 ```
 
 ---
 
-## 📊 Skill Matrix
+## 🔄 Multi-Agent Workflows
 
-| Agent | Planning | Execution | Analysis | Synthesis | Caching | Human Interaction |
-|-------|----------|-----------|----------|-----------|---------|-------------------|
-| **Orchestrator** | ✅✅✅ | ✅ | ✅✅ | - | - | ✅ |
-| **Genie** | - | ✅✅✅ | - | - | ✅✅✅ | - |
-| **Table Understanding** | - | ✅✅ | ✅✅✅ | - | ✅ | - |
-| **RAG** | - | ✅✅✅ | ✅ | - | ✅ | - |
-| **Synthesis** | - | - | ✅ | ✅✅✅ | - | - |
-| **Human Loop** | - | - | - | - | - | ✅✅✅ |
+### Workflow 1: Simple SQL Query
 
-Legend: ✅ = Basic, ✅✅ = Intermediate, ✅✅✅ = Advanced
+```
+Step 1: supervisor (analyze + route)
+Step 2: SQL_Specialist (execute query)
+Step 3: supervisor (review results)
+Step 4: synthesis (format answer)
+
+Iterations: 2
+Typical Latency: 5-10s
+```
+
+### Workflow 2: Document-Enhanced Query
+
+```
+Step 1: supervisor (analyze + route)
+Step 2: SQL_Specialist (get data)
+Step 3: supervisor (needs context)
+Step 4: document_search (find relevant docs)
+Step 5: supervisor (combine)
+Step 6: synthesis (merge SQL + docs)
+
+Iterations: 4
+Typical Latency: 10-15s
+```
+
+### Workflow 3: Replanning After Failure
+
+```
+Iteration 1:
+  supervisor → SQL_Specialist (fails: table not found)
+
+Iteration 2:
+  supervisor (replan) → SQL_Specialist (try different approach)
+
+Iteration 3:
+  supervisor → synthesis (success!)
+
+Total Iterations: 3
+```
+
+### Workflow 4: Human Escalation
+
+```
+Iteration 1-5: Various attempts fail
+Iteration 6: supervisor → HUMAN
+  "I've tried multiple approaches but need your help..."
+
+[Wait for human response]
+
+Iteration 7: supervisor (with clarification) → continue
+```
 
 ---
 
-## 🎯 Future Skills
+## 📊 Agent Capabilities Matrix
 
-### Planned Enhancements
+| Agent | Routing | SQL Execution | Document Search | Synthesis | Human Interaction |
+|-------|---------|---------------|-----------------|-----------|-------------------|
+| **Supervisor** | ✅✅✅ | - | - | - | ✅ |
+| **SQL_Specialist** | - | ✅✅✅ | - | - | - |
+| **document_search** | - | - | ✅✅✅ | - | - |
+| **Synthesis** | - | - | - | ✅✅✅ | - |
+| **Human** | - | - | - | - | ✅✅✅ |
 
-1. **Orchestrator:**
-   - Parallel agent execution
-   - A/B testing of strategies
-   - Cost optimization
-
-2. **Genie:**
-   - Query optimization suggestions
-   - Result streaming
-   - Incremental updates
-
-3. **Table Understanding:**
-   - Auto-relationship detection
-   - Data quality scoring
-   - Schema evolution tracking
-
-4. **RAG:**
-   - Multi-modal support (images, tables)
-   - Document versioning
-   - Citation extraction
-
-5. **Synthesis:**
-   - Chart/graph generation
-   - Multi-language support
-   - Sentiment analysis
+**Legend:** ✅ = Basic, ✅✅ = Intermediate, ✅✅✅ = Advanced
 
 ---
 
-## 📚 References
+## 🎯 Customization & Extension
 
-For detailed implementation, see:
-- CLAUDE.md - Complete architecture guide
-- PROGRESS.md - Development status
-- Source code in `src/agents/`
+### Add New Specialist Agent
+
+**Example: Web Search Agent**
+
+```python
+def create_web_search_agent():
+    """Add web search capability"""
+    from langchain_community.tools import DuckDuckGoSearchRun
+
+    search_tool = DuckDuckGoSearchRun()
+
+    return create_retriever_tool(
+        search_tool,
+        "web_search",
+        """Web search specialist. Use for:
+        - Current events and news
+        - External information
+        - General knowledge
+
+        Returns: Search results from the web"""
+    )
+
+# Add to graph
+workflow.add_node("web_search", ToolNode([web_search_agent]))
+
+# Update supervisor routing
+# Add: "For current events → web_search"
+```
+
+### Add Custom State Fields
+
+```python
+class AgentState(TypedDict):
+    messages: Annotated[list[BaseMessage], operator.add]
+    next_agent: str
+    iterations: int
+    final_answer: str
+
+    # Custom fields
+    confidence: float      # Track confidence
+    sources: list[str]     # Track all sources
+    user_id: str          # Track user
+```
+
+### Add Result Grading
+
+```python
+def create_grader_node():
+    """Grade specialist results for relevance"""
+    model = AzureChatOpenAI(...)
+
+    def grader_node(state: AgentState):
+        # Grade result
+        grade = model.invoke([
+            SystemMessage("Grade result: RELEVANT or NOT_RELEVANT"),
+            *state["messages"]
+        ])
+
+        if grade == "NOT_RELEVANT":
+            return {"next_agent": "supervisor"}  # Replan
+        else:
+            return {"next_agent": "synthesis"}   # Continue
+
+    return grader_node
+
+# Add to graph
+workflow.add_node("grader", create_grader_node())
+workflow.add_edge("SQL_Specialist", "grader")
+```
 
 ---
 
-**Version:** 1.0.0
-**Last Updated:** 2026-02-05
+## 📚 Best Practices
+
+### 1. Question Formulation
+
+**✅ Good:**
+- "What were our top 5 products by revenue in Q4 2025?"
+- "Compare Q4 sales against company policy targets"
+- "What does the customer churn report say?"
+
+**❌ Poor:**
+- "Show me data" (too vague)
+- "Give me everything" (too broad)
+- "What happened?" (no context)
+
+### 2. Document Organization
+
+**Recommended Structure:**
+```
+data/documents/
+├── policies/
+│   ├── refund_policy.pdf
+│   └── sales_targets_2025.pdf
+├── reports/
+│   ├── Q4_2025_analysis.docx
+│   └── customer_churn_report.pdf
+└── technical/
+    └── api_documentation.pdf
+```
+
+### 3. Conversation Memory
+
+**Use thread_id for:**
+- Multi-turn conversations
+- Follow-up questions
+- Context retention across queries
+
+**Start fresh for:**
+- New users
+- Different topics
+- Independent queries
+
+---
+
+## 📖 References
+
+**Documentation:**
+- **CLAUDE.md** - Complete architecture guide
+- **REFERENCE.md** - API reference and examples
+- **README.md** - Quick start guide
+
+**Implementation:**
+- **src/agent.py** - All agent implementations
+- **src/main.py** - CLI interface
+
+**External Resources:**
+- **LangGraph:** https://langchain-ai.github.io/langgraph/
+- **Databricks Genie:** https://docs.databricks.com/generative-ai/agent-framework/multi-agent-genie
+- **databricks-langchain:** https://pypi.org/project/databricks-langchain/
+
+---
+
+**Version:** 2.0.0
+**Date:** 2026-02-06
+**Status:** ✅ Production-Ready
