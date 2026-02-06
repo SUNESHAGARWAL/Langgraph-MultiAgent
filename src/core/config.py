@@ -95,14 +95,20 @@ class VectorStoreConfig(BaseSettings):
 
 
 class RAGConfig(BaseSettings):
-    """RAG Configuration"""
+    """
+    RAG Configuration
 
-    watch_path: str = Field(..., alias="RAG_WATCH_PATH")
+    IMPORTANT: RAG now monitors Azure Blob Storage (not local filesystem).
+    watch_path is deprecated - files are monitored in AZURE_STORAGE_CONTAINER_RAG.
+    """
+
+    watch_path: Optional[str] = Field(default=None, alias="RAG_WATCH_PATH")  # Deprecated
     auto_process: bool = Field(default=True, alias="RAG_AUTO_PROCESS")
     supported_extensions: List[str] = Field(
         default_factory=lambda: [".pdf", ".txt", ".csv", ".docx", ".pptx", ".xlsx"],
         alias="RAG_SUPPORTED_EXTENSIONS"
     )
+    poll_interval: int = Field(default=10, alias="RAG_POLL_INTERVAL")  # seconds
 
     @field_validator("supported_extensions", mode="before")
     @classmethod

@@ -152,21 +152,28 @@ class AzureBlobStorage:
     @trace_function("list_blobs")
     def list_blobs(self, container_name: str, prefix: Optional[str] = None) -> list:
         """
-        List blobs in container.
+        List blobs in container with metadata.
 
         Args:
             container_name: Container name
             prefix: Optional prefix filter
 
         Returns:
-            List of blob names
+            List of dicts with blob info: [{"name": "...", "last_modified": datetime, "size": int}, ...]
         """
         try:
             container_client = self.blob_service_client.get_container_client(
                 container_name
             )
             blobs = container_client.list_blobs(name_starts_with=prefix)
-            return [blob.name for blob in blobs]
+            return [
+                {
+                    "name": blob.name,
+                    "last_modified": blob.last_modified,
+                    "size": blob.size,
+                }
+                for blob in blobs
+            ]
         except Exception as e:
             logger.error(f"Failed to list blobs: {e}")
             return []
@@ -266,3 +273,9 @@ def get_storage_service() -> AzureBlobStorage:
     if _storage_service is None:
         _storage_service = AzureBlobStorage()
     return _storage_service
+
+
+# Alias for consistency
+def get_blob_storage() -> AzureBlobStorage:
+    """Alias for get_storage_service()"""
+    return get_storage_service()
