@@ -32,6 +32,7 @@ class DatabricksConfig(BaseSettings):
     host: str = Field(..., alias="DATABRICKS_HOST")
     token: str = Field(..., alias="DATABRICKS_TOKEN")
     workspace_id: Optional[str] = Field(default=None, alias="DATABRICKS_WORKSPACE_ID")
+    sql_warehouse_id: str = Field(..., alias="DATABRICKS_SQL_WAREHOUSE_ID")
 
     genie_space_id: str = Field(..., alias="GENIE_SPACE_ID")
     genie_timeout: int = Field(default=30, alias="GENIE_TIMEOUT")

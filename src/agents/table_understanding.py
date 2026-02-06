@@ -232,7 +232,7 @@ class TableUnderstandingAgent:
             # Execute statement
             statement = self.client.statement_execution.execute_statement(
                 statement=query,
-                warehouse_id=None,  # Will use default warehouse
+                warehouse_id=config.databricks.sql_warehouse_id,
                 timeout=f"{timeout}s",
             )
 
