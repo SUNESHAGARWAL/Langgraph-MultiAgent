@@ -38,14 +38,19 @@ class DatabricksConfig(BaseSettings):
 
     unity_catalog: str = Field(default="main", alias="UNITY_CATALOG_NAME")
     unity_schema: str = Field(default="default", alias="UNITY_CATALOG_SCHEMA")
-    unity_tables: List[str] = Field(default_factory=list, alias="UNITY_CATALOG_TABLES")
+    unity_tables: str = Field(default="", alias="UNITY_CATALOG_TABLES")
 
-    @field_validator("unity_tables", mode="before")
+    @field_validator("unity_tables", mode="after")
     @classmethod
     def parse_tables(cls, v):
+        """Parse comma-separated table names into a list"""
         if isinstance(v, str):
+            if not v.strip():
+                return []
             return [t.strip() for t in v.split(",") if t.strip()]
-        return v
+        elif isinstance(v, list):
+            return v
+        return []
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
