@@ -6,7 +6,6 @@ Handles natural language to SQL conversion and query execution on Unity Catalog.
 import time
 from typing import Dict, Any, Optional, List
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.service.workspace import GenieMessageQueryResultsRequest
 
 from src.core.config import config
 from src.services.caching import get_smart_cache

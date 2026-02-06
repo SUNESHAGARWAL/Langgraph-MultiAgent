@@ -157,18 +157,21 @@ class RAGConfig(BaseSettings):
 
     watch_path: Optional[str] = Field(default=None, alias="RAG_WATCH_PATH")  # Deprecated
     auto_process: bool = Field(default=True, alias="RAG_AUTO_PROCESS")
-    supported_extensions: List[str] = Field(
-        default_factory=lambda: [".pdf", ".txt", ".csv", ".docx", ".pptx", ".xlsx"],
+    supported_extensions: str = Field(
+        default=".pdf,.txt,.csv,.docx,.pptx,.xlsx",
         alias="RAG_SUPPORTED_EXTENSIONS"
     )
     poll_interval: int = Field(default=10, alias="RAG_POLL_INTERVAL")  # seconds
 
-    @field_validator("supported_extensions", mode="before")
+    @field_validator("supported_extensions", mode="after")
     @classmethod
     def parse_extensions(cls, v):
+        """Parse comma-separated extensions into a list"""
         if isinstance(v, str):
             return [ext.strip() for ext in v.split(",") if ext.strip()]
-        return v
+        elif isinstance(v, list):
+            return v
+        return [".pdf", ".txt", ".csv", ".docx", ".pptx", ".xlsx"]
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
