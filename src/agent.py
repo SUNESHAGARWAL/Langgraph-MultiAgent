@@ -107,7 +107,15 @@ def create_agent_graph():
         max_tokens=config.llm.max_tokens,
     )
 
-    # 2. Create tools
+    # 2. Create Databricks WorkspaceClient for authentication
+    from databricks.sdk import WorkspaceClient
+
+    workspace_client = WorkspaceClient(
+        host=config.databricks.host,
+        token=config.databricks.token,
+    )
+
+    # 3. Create tools
     tools = []
 
     # Genie tool for SQL queries
@@ -117,8 +125,12 @@ def create_agent_graph():
         description=f"Execute natural language SQL queries on Unity Catalog. "
                    f"Has access to tables: {', '.join(config.databricks.unity_tables)}. "
                    f"Use this for questions about data, analytics, sales, customers, products, etc.",
+        client=workspace_client,  # Proper authentication
+        return_pandas=False,  # Return markdown strings (easier for LLM)
     )
     tools.append(genie_tool)
+
+    logger.info(f"Initialized GenieAgent with space ID: {config.databricks.genie_space_id}")
 
     # Retriever tool for RAG (if available)
     vectorstore = create_vector_store()
@@ -132,14 +144,14 @@ def create_agent_graph():
     # Bind tools to model
     model_with_tools = model.bind_tools(tools)
 
-    # 3. Define agent node
+    # 4. Define agent node
     def agent_node(state: MessagesState):
         """Agent node that calls LLM with tools"""
         messages = state["messages"]
         response = model_with_tools.invoke(messages)
         return {"messages": [response]}
 
-    # 4. Build graph
+    # 5. Build LangGraph StateGraph
     workflow = StateGraph(MessagesState)
 
     # Add nodes
