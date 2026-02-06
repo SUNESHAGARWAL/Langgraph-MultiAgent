@@ -14,7 +14,7 @@ import faiss
 import numpy as np
 from langchain_community.vectorstores import FAISS
 from langchain_community.docstore.in_memory import InMemoryDocstore
-from langchain.schema import Document
+from langchain_core.documents import Document
 
 from src.core.config import config
 from src.utils.embeddings import get_embedding_service
