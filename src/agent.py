@@ -1,23 +1,29 @@
 """
-Multi-Agent System using LangGraph
+Multi-Agent Orchestrator using LangGraph Supervisor Pattern
 
-Clean implementation using:
-- LangGraph StateGraph (not custom orchestration)
-- Databricks GenieAgent (pre-built)
-- LangChain retriever tools (not custom)
-- Simple, minimal code
+Architecture:
+- Supervisor Agent: Orchestrates and routes to specialists
+- Genie Agent: SQL queries on Unity Catalog
+- RAG Agent: Document retrieval and search
+- Synthesis Agent: Combines results from multiple agents
+- Human Agent: Asks clarifying questions when needed
+
+The supervisor decides which agent(s) to call, can replan, and iterates until complete.
 """
 
-from typing import Literal
-from langchain_core.messages import HumanMessage
+from typing import Annotated, Literal, TypedDict
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, BaseMessage
 from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
-from langchain_community.document_loaders import DirectoryLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.tools.retriever import create_retriever_tool
-from langgraph.graph import StateGraph, MessagesState
-from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.graph import StateGraph, MessagesState, END
+from langgraph.prebuilt import ToolNode
+from langgraph.checkpoint.memory import MemorySaver
 from databricks_langchain.genie import GenieAgent
+from databricks.sdk import WorkspaceClient
+import functools
+import operator
 
 from src.core.config import config
 from src.utils.logging import get_logger
@@ -26,21 +32,57 @@ from src.utils.parsers import load_documents_from_directory
 logger = get_logger(__name__)
 
 
-def create_vector_store():
-    """
-    Create FAISS vector store from documents.
+# ============================================================================
+# 1. AGENT STATE
+# ============================================================================
 
-    Simple implementation - loads documents once and creates vector store.
-    No complex monitoring, caching, or Azure Blob integration.
-    """
+class AgentState(TypedDict):
+    """State for multi-agent system"""
+    messages: Annotated[list[BaseMessage], operator.add]
+    next_agent: str  # Which agent to call next
+    iterations: int  # Track iterations to prevent infinite loops
+    final_answer: str  # Final synthesized answer
+
+
+# ============================================================================
+# 2. SPECIALIST AGENTS
+# ============================================================================
+
+def create_genie_agent():
+    """Create Genie specialist agent for SQL queries"""
+    workspace_client = WorkspaceClient(
+        host=config.databricks.host,
+        token=config.databricks.token,
+    )
+
+    genie_tool = GenieAgent(
+        genie_space_id=config.databricks.genie_space_id,
+        genie_agent_name="SQL_Specialist",
+        description=f"""SQL query specialist. Use ONLY for:
+        - Querying sales, revenue, transaction data
+        - Customer analytics and demographics
+        - Product performance and inventory
+        - Any data/analytics questions requiring SQL
+
+        Available tables: {', '.join(config.databricks.unity_tables)}
+
+        Returns: Query results as markdown tables""",
+        client=workspace_client,
+        return_pandas=False,
+    )
+
+    logger.info("Created Genie specialist agent")
+    return genie_tool
+
+
+def create_rag_agent():
+    """Create RAG specialist agent for document retrieval"""
     try:
-        logger.info("Creating vector store from documents")
-
-        # Load documents (if any exist)
+        # Load documents
         docs = load_documents_from_directory("./data/documents")
 
         if not docs:
-            logger.warning("No documents found - RAG will not be available")
+            logger.warning("No documents found - RAG agent not available")
             return None
 
         # Split documents
@@ -62,42 +104,46 @@ def create_vector_store():
 
         # Create vector store
         vectorstore = FAISS.from_documents(splits, embeddings)
+        retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
 
-        logger.info("Vector store created successfully")
-        return vectorstore
+        # Create retriever tool
+        rag_tool = create_retriever_tool(
+            retriever,
+            "document_search",
+            """Document search specialist. Use ONLY for:
+            - Company policies, procedures, guidelines
+            - Technical documentation and manuals
+            - Reference materials from uploaded PDFs/DOCX
+            - Knowledge base articles
+
+            Do NOT use for real-time data or analytics.
+
+            Returns: Relevant document excerpts with sources""",
+        )
+
+        logger.info("Created RAG specialist agent")
+        return rag_tool
 
     except Exception as e:
-        logger.warning(f"Failed to create vector store: {e}")
+        logger.warning(f"Failed to create RAG agent: {e}")
         return None
 
 
-def create_retriever_tool_if_available(vectorstore):
-    """Create retriever tool if vector store exists"""
-    if vectorstore is None:
-        return None
+# ============================================================================
+# 3. SUPERVISOR AGENT (ORCHESTRATOR)
+# ============================================================================
 
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
-
-    return create_retriever_tool(
-        retriever,
-        "search_documents",
-        "Search through uploaded documents and knowledge base. "
-        "Use this to find information from PDF, DOCX, and other uploaded files.",
-    )
-
-
-def create_agent_graph():
+def create_supervisor_agent(agents: list):
     """
-    Create LangGraph agent with tools.
+    Create supervisor agent that routes to specialists.
 
-    Uses StateGraph with:
-    - Databricks GenieAgent for SQL queries
-    - Retriever tool for RAG (if documents available)
-    - Simple message-based state
+    The supervisor:
+    1. Analyzes the user question
+    2. Decides which specialist(s) to call
+    3. Can replan if results are insufficient
+    4. Synthesizes final answer
+    5. Asks human if stuck
     """
-    logger.info("Creating agent graph")
-
-    # 1. Initialize LLM
     model = AzureChatOpenAI(
         azure_endpoint=config.azure_openai.endpoint,
         api_key=config.azure_openai.api_key,
@@ -107,77 +153,242 @@ def create_agent_graph():
         max_tokens=config.llm.max_tokens,
     )
 
-    # 2. Create Databricks WorkspaceClient for authentication
-    from databricks.sdk import WorkspaceClient
+    # Available agent names
+    agent_names = [a.name if hasattr(a, 'name') else str(a) for a in agents if a is not None]
+    options = ["FINISH"] + agent_names + ["HUMAN"]
 
-    workspace_client = WorkspaceClient(
-        host=config.databricks.host,
-        token=config.databricks.token,
-    )
+    system_prompt = f"""You are a supervisor agent coordinating a team of specialists:
 
-    # 3. Create tools
-    tools = []
+AVAILABLE SPECIALISTS:
+{chr(10).join(f'- {name}' for name in agent_names)}
 
-    # Genie tool for SQL queries
-    genie_tool = GenieAgent(
-        genie_space_id=config.databricks.genie_space_id,
-        genie_agent_name="Databricks_Genie",
-        description=f"Execute natural language SQL queries on Unity Catalog. "
-                   f"Has access to tables: {', '.join(config.databricks.unity_tables)}. "
-                   f"Use this for questions about data, analytics, sales, customers, products, etc.",
-        client=workspace_client,  # Proper authentication
-        return_pandas=False,  # Return markdown strings (easier for LLM)
-    )
-    tools.append(genie_tool)
+YOUR ROLE:
+1. Analyze user questions
+2. Route to appropriate specialist(s)
+3. Replan if results are insufficient
+4. Synthesize final answers
+5. Ask HUMAN for clarification when needed
 
-    logger.info(f"Initialized GenieAgent with space ID: {config.databricks.genie_space_id}")
+ROUTING RULES:
+- For data/SQL queries → SQL_Specialist
+- For document/policy questions → document_search
+- If unsure or need clarification → HUMAN
+- When you have complete answer → FINISH
 
-    # Retriever tool for RAG (if available)
-    vectorstore = create_vector_store()
-    retriever_tool = create_retriever_tool_if_available(vectorstore)
-    if retriever_tool:
-        tools.append(retriever_tool)
-        logger.info("Added retriever tool for RAG")
-    else:
-        logger.info("No retriever tool - RAG not available")
+IMPORTANT:
+- You can call multiple specialists
+- You can replan and retry
+- Always synthesize results clearly
+- Cite sources
+- If stuck after 3 iterations → ask HUMAN
 
-    # Bind tools to model
-    model_with_tools = model.bind_tools(tools)
+Respond with ONLY the next agent name: {', '.join(options)}"""
 
-    # 4. Define agent node
-    def agent_node(state: MessagesState):
-        """Agent node that calls LLM with tools"""
+    def supervisor_node(state: AgentState):
+        """Supervisor decides which agent to call next"""
         messages = state["messages"]
-        response = model_with_tools.invoke(messages)
-        return {"messages": [response]}
+        iterations = state.get("iterations", 0)
 
-    # 5. Build LangGraph StateGraph
-    workflow = StateGraph(MessagesState)
+        # Check iteration limit
+        if iterations >= 5:
+            return {
+                "next_agent": "HUMAN",
+                "messages": [AIMessage(content="I've tried multiple approaches but need your help. Could you provide more details?")],
+                "iterations": iterations + 1
+            }
+
+        # Ask supervisor to route
+        response = model.invoke([
+            SystemMessage(content=system_prompt),
+            *messages
+        ])
+
+        # Extract next agent from response
+        next_agent = response.content.strip()
+
+        # Validate
+        if next_agent not in options:
+            next_agent = "FINISH"
+
+        logger.info(f"Supervisor routing to: {next_agent} (iteration {iterations})")
+
+        return {
+            "next_agent": next_agent,
+            "messages": [response],
+            "iterations": iterations + 1
+        }
+
+    return supervisor_node
+
+
+# ============================================================================
+# 4. SYNTHESIS AGENT
+# ============================================================================
+
+def create_synthesis_agent():
+    """Create agent that synthesizes results from multiple specialists"""
+    model = AzureChatOpenAI(
+        azure_endpoint=config.azure_openai.endpoint,
+        api_key=config.azure_openai.api_key,
+        azure_deployment=config.azure_openai.gpt4o_deployment,
+        api_version=config.azure_openai.api_version,
+        temperature=0.3,  # Lower temperature for consistent synthesis
+    )
+
+    system_prompt = """You are a synthesis specialist. Your job is to:
+
+1. Combine results from multiple agents
+2. Create a coherent, comprehensive answer
+3. Cite all sources clearly
+4. Format nicely for the user
+
+When synthesizing:
+- Combine SQL results and document excerpts
+- Highlight key findings
+- Use markdown formatting
+- Always cite sources (e.g., "According to sales_data table..." or "From policy document...")
+- Be concise but complete"""
+
+    def synthesis_node(state: AgentState):
+        """Synthesize final answer from all agent responses"""
+        messages = state["messages"]
+
+        response = model.invoke([
+            SystemMessage(content=system_prompt),
+            *messages,
+            HumanMessage(content="Please synthesize the above information into a final answer.")
+        ])
+
+        return {
+            "messages": [response],
+            "final_answer": response.content,
+            "next_agent": "FINISH"
+        }
+
+    return synthesis_node
+
+
+# ============================================================================
+# 5. HUMAN-IN-THE-LOOP AGENT
+# ============================================================================
+
+def create_human_node():
+    """Create node that asks human for input"""
+
+    def human_node(state: AgentState):
+        """Ask human for clarification"""
+        messages = state["messages"]
+
+        # Extract what we're confused about
+        last_message = messages[-1].content if messages else "I need clarification"
+
+        # In CLI, this will pause and wait for input
+        # In production, you'd handle this differently (webhook, queue, etc.)
+        return {
+            "messages": [AIMessage(content=f"Asking human for clarification: {last_message}")],
+            "next_agent": "FINISH"  # For now, finish after asking
+        }
+
+    return human_node
+
+
+# ============================================================================
+# 6. BUILD MULTI-AGENT GRAPH
+# ============================================================================
+
+def create_multi_agent_graph():
+    """
+    Create multi-agent graph with supervisor pattern.
+
+    Flow:
+    1. User question → Supervisor
+    2. Supervisor → Specialist(s)
+    3. Specialist → Supervisor (with results)
+    4. Supervisor → Synthesis or Replan
+    5. Synthesis → Final Answer
+    """
+    logger.info("Creating multi-agent graph")
+
+    # Create specialist agents
+    genie_agent = create_genie_agent()
+    rag_agent = create_rag_agent()
+
+    # Collect available agents
+    agents = [genie_agent, rag_agent]
+
+    # Create supervisor
+    supervisor = create_supervisor_agent(agents)
+
+    # Create synthesis agent
+    synthesis = create_synthesis_agent()
+
+    # Create human node
+    human = create_human_node()
+
+    # Build graph
+    workflow = StateGraph(AgentState)
 
     # Add nodes
-    workflow.add_node("agent", agent_node)
-    workflow.add_node("tools", ToolNode(tools))
+    workflow.add_node("supervisor", supervisor)
+    workflow.add_node("synthesis", synthesis)
+    workflow.add_node("human", human)
+
+    # Add specialist nodes (as tools)
+    if genie_agent:
+        workflow.add_node("SQL_Specialist", ToolNode([genie_agent]))
+    if rag_agent:
+        workflow.add_node("document_search", ToolNode([rag_agent]))
 
     # Set entry point
-    workflow.set_entry_point("agent")
+    workflow.set_entry_point("supervisor")
 
-    # Add conditional edges
+    # Add conditional edges from supervisor
+    def route_from_supervisor(state: AgentState):
+        """Route based on supervisor's decision"""
+        next_agent = state.get("next_agent", "FINISH")
+
+        if next_agent == "FINISH":
+            return "synthesis"
+        elif next_agent == "HUMAN":
+            return "human"
+        else:
+            return next_agent
+
     workflow.add_conditional_edges(
-        "agent",
-        tools_condition,
+        "supervisor",
+        route_from_supervisor,
+        {
+            "synthesis": "synthesis",
+            "human": "human",
+            "SQL_Specialist": "SQL_Specialist",
+            "document_search": "document_search",
+        }
     )
 
-    # Add edge from tools back to agent
-    workflow.add_edge("tools", "agent")
+    # All specialists return to supervisor
+    if genie_agent:
+        workflow.add_edge("SQL_Specialist", "supervisor")
+    if rag_agent:
+        workflow.add_edge("document_search", "supervisor")
+
+    # Synthesis and human end
+    workflow.add_edge("synthesis", END)
+    workflow.add_edge("human", END)
+
+    # Add memory for conversation history
+    memory = MemorySaver()
 
     # Compile
-    graph = workflow.compile()
+    graph = workflow.compile(checkpointer=memory)
 
-    logger.info("Agent graph created successfully")
+    logger.info("Multi-agent graph created successfully")
     return graph
 
 
-# Singleton instance
+# ============================================================================
+# 7. SINGLETON
+# ============================================================================
+
 _agent_graph = None
 
 
@@ -185,5 +396,5 @@ def get_agent():
     """Get or create singleton agent graph"""
     global _agent_graph
     if _agent_graph is None:
-        _agent_graph = create_agent_graph()
+        _agent_graph = create_multi_agent_graph()
     return _agent_graph

@@ -1,9 +1,14 @@
 """
 Main entry point for Multi-Agent Orchestrator
 
-Simple CLI using LangGraph agent with Databricks Genie and RAG.
+Uses LangGraph Multi-Agent Supervisor pattern with:
+- Supervisor Agent: Routes to specialists
+- Specialist Agents: Genie (SQL), RAG (docs)
+- Synthesis Agent: Combines results
+- Human-in-Loop: Asks for clarification
 """
 
+import uuid
 from langchain_core.messages import HumanMessage
 from src.agent import get_agent
 from src.utils.logging import get_logger
@@ -13,26 +18,35 @@ logger = get_logger(__name__)
 
 def main():
     """
-    Simple CLI for interacting with the agent.
+    Simple CLI for multi-agent orchestrator.
     """
     print("=" * 80)
-    print("Multi-Agent Orchestrator (LangGraph + Databricks Genie)")
+    print("Multi-Agent Orchestrator (Supervisor + Specialists)")
     print("=" * 80)
     print()
 
-    # Initialize agent
+    # Initialize agent graph
     try:
         agent = get_agent()
-        print("✅ Agent initialized successfully")
+        print("✅ Multi-agent system initialized")
+        print()
+        print("Architecture:")
+        print("  - Supervisor: Routes to specialists")
+        print("  - SQL Specialist: Queries Unity Catalog via Genie")
+        print("  - Document Specialist: Searches uploaded documents")
+        print("  - Synthesis: Combines results")
         print()
     except Exception as e:
-        print(f"❌ Failed to initialize agent: {e}")
-        logger.error(f"Agent initialization failed: {e}")
+        print(f"❌ Failed to initialize: {e}")
+        logger.error(f"Initialization failed: {e}")
         return
 
     # Interactive loop
     print("💬 Ask me anything! (type 'exit' to quit)")
     print()
+
+    # Generate thread ID for conversation memory
+    thread_id = str(uuid.uuid4())
 
     try:
         while True:
@@ -46,33 +60,53 @@ def main():
                 print("\n👋 Goodbye!")
                 break
 
-            # Invoke agent
-            print()
+            # Invoke multi-agent system
+            print("\n🤖 Processing...\n")
+
             try:
-                result = agent.invoke({"messages": [HumanMessage(content=question)]})
+                # Initial state
+                initial_state = {
+                    "messages": [HumanMessage(content=question)],
+                    "next_agent": "",
+                    "iterations": 0,
+                    "final_answer": ""
+                }
 
-                # Extract answer
-                messages = result.get("messages", [])
-                if messages:
-                    last_message = messages[-1]
-                    answer = last_message.content if hasattr(last_message, 'content') else str(last_message)
+                # Invoke with conversation memory
+                result = agent.invoke(
+                    initial_state,
+                    config={"configurable": {"thread_id": thread_id}}
+                )
 
-                    print("✨ Agent:")
-                    print(answer)
-                else:
-                    print("⚠️  No response from agent")
+                # Extract final answer
+                final_answer = result.get("final_answer", "")
+
+                if not final_answer:
+                    # Fallback to last message
+                    messages = result.get("messages", [])
+                    if messages:
+                        final_answer = messages[-1].content
+
+                print("✨ Answer:")
+                print(final_answer)
+                print()
+
+                # Show iterations
+                iterations = result.get("iterations", 0)
+                if iterations > 1:
+                    print(f"⚙️  Solved in {iterations} iterations")
+                    print()
 
             except Exception as e:
                 print(f"❌ Error: {str(e)}")
-                logger.error(f"Query failed: {e}")
-
-            print()
+                logger.error(f"Query failed: {e}", exc_info=True)
+                print()
 
     except KeyboardInterrupt:
         print("\n\n👋 Interrupted. Goodbye!")
     except Exception as e:
         print(f"\n❌ Unexpected error: {e}")
-        logger.error(f"Unexpected error in main loop: {e}")
+        logger.error(f"Unexpected error: {e}", exc_info=True)
 
 
 if __name__ == "__main__":
