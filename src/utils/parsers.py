@@ -247,3 +247,39 @@ def get_document_parser() -> DocumentParser:
     if _document_parser is None:
         _document_parser = DocumentParser()
     return _document_parser
+
+
+def load_documents_from_directory(directory: str) -> List:
+    """
+    Load all supported documents from a directory.
+
+    Returns list of LangChain Document objects.
+    """
+    from langchain_core.documents import Document
+
+    if not os.path.exists(directory):
+        logger.warning(f"Directory does not exist: {directory}")
+        return []
+
+    parser = get_document_parser()
+    documents = []
+
+    for root, _, files in os.walk(directory):
+        for file in files:
+            file_path = os.path.join(root, file)
+            file_ext = Path(file_path).suffix.lower()
+
+            if file_ext in DocumentParser.SUPPORTED_EXTENSIONS:
+                try:
+                    parsed = parser.parse(file_path)
+                    doc = Document(
+                        page_content=parsed["text"],
+                        metadata=parsed["metadata"]
+                    )
+                    documents.append(doc)
+                    logger.debug(f"Loaded: {file}")
+                except Exception as e:
+                    logger.warning(f"Failed to parse {file}: {e}")
+
+    logger.info(f"Loaded {len(documents)} documents from {directory}")
+    return documents

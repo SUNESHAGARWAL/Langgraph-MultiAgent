@@ -1,192 +1,177 @@
 """
-Multi-Agent Orchestrator using LangChain Deep Agents
+Multi-Agent System using LangGraph
 
-This module creates a Deep Agent with:
-- Databricks Genie for SQL queries (via databricks_langchain.GenieAgent)
-- Vector Search for RAG (via databricks_langchain.VectorSearchRetrieverTool)
-- Custom tools for Azure Blob Storage RAG monitoring
-- TodoListMiddleware for planning and task management
-
-Architecture:
-- Uses LangChain's create_agent (not custom orchestrator)
-- Uses built-in middleware (TodoListMiddleware)
-- Leverages Databricks pre-built integrations
-- Minimal custom code, maximum library usage
+Clean implementation using:
+- LangGraph StateGraph (not custom orchestration)
+- Databricks GenieAgent (pre-built)
+- LangChain retriever tools (not custom)
+- Simple, minimal code
 """
 
-from typing import List, Optional
-from langchain.chat_models import init_chat_model
-from langchain.agents import create_agent
-from langchain.agents.middleware import TodoListMiddleware
-from langchain_core.tools import tool
-
-# Databricks integrations
+from typing import Literal
+from langchain_core.messages import HumanMessage
+from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_community.document_loaders import DirectoryLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.tools.retriever import create_retriever_tool
+from langgraph.graph import StateGraph, MessagesState
+from langgraph.prebuilt import ToolNode, tools_condition
 from databricks_langchain.genie import GenieAgent
-from databricks_langchain.vectorsearch import VectorSearchRetrieverTool
 
 from src.core.config import config
 from src.utils.logging import get_logger
-from src.services.storage import get_storage_service
+from src.utils.parsers import load_documents_from_directory
 
 logger = get_logger(__name__)
 
 
-def create_rag_retriever_tool():
+def create_vector_store():
     """
-    Create vector search retriever tool for RAG using Databricks Vector Search.
+    Create FAISS vector store from documents.
 
-    If you have a Databricks Vector Search index set up, use VectorSearchRetrieverTool.
-    Otherwise, this returns None and we'll use Azure Blob Storage monitoring.
+    Simple implementation - loads documents once and creates vector store.
+    No complex monitoring, caching, or Azure Blob integration.
     """
-    # TODO: Configure if you have Databricks Vector Search index
-    vector_search_index = None  # Set to your index name if available
+    try:
+        logger.info("Creating vector store from documents")
 
-    if vector_search_index:
-        return VectorSearchRetrieverTool(
-            index_name=vector_search_index,
-            num_results=5,
-            tool_name="search_documents",
-            tool_description="Search through uploaded documents and knowledge base",
+        # Load documents (if any exist)
+        docs = load_documents_from_directory("./data/documents")
+
+        if not docs:
+            logger.warning("No documents found - RAG will not be available")
+            return None
+
+        # Split documents
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=config.embedding.chunk_size,
+            chunk_overlap=config.embedding.chunk_overlap,
+        )
+        splits = text_splitter.split_documents(docs)
+
+        logger.info(f"Split {len(docs)} documents into {len(splits)} chunks")
+
+        # Create embeddings
+        embeddings = AzureOpenAIEmbeddings(
+            azure_endpoint=config.azure_openai.endpoint,
+            api_key=config.azure_openai.api_key,
+            azure_deployment=config.azure_openai.embedding_deployment,
+            api_version=config.azure_openai.api_version,
         )
 
-    # Fallback: Custom Azure Blob Storage RAG tool
-    return create_azure_blob_rag_tool()
+        # Create vector store
+        vectorstore = FAISS.from_documents(splits, embeddings)
+
+        logger.info("Vector store created successfully")
+        return vectorstore
+
+    except Exception as e:
+        logger.warning(f"Failed to create vector store: {e}")
+        return None
 
 
-@tool
-def create_azure_blob_rag_tool():
+def create_retriever_tool_if_available(vectorstore):
+    """Create retriever tool if vector store exists"""
+    if vectorstore is None:
+        return None
+
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
+
+    return create_retriever_tool(
+        retriever,
+        "search_documents",
+        "Search through uploaded documents and knowledge base. "
+        "Use this to find information from PDF, DOCX, and other uploaded files.",
+    )
+
+
+def create_agent_graph():
     """
-    Search and retrieve documents from Azure Blob Storage.
+    Create LangGraph agent with tools.
 
-    This tool monitors the configured Azure Blob Storage container for RAG documents
-    and provides semantic search over the indexed content.
-
-    Returns:
-        Relevant document chunks based on the query
+    Uses StateGraph with:
+    - Databricks GenieAgent for SQL queries
+    - Retriever tool for RAG (if documents available)
+    - Simple message-based state
     """
-    from src.services.vector_store import get_vector_store
+    logger.info("Creating agent graph")
 
-    def search_documents(query: str, top_k: int = 5) -> str:
-        """
-        Search through uploaded documents in Azure Blob Storage.
-
-        Args:
-            query: Natural language query to search for
-            top_k: Number of results to return (default: 5)
-
-        Returns:
-            Relevant document excerpts
-        """
-        vector_store = get_vector_store("rag_documents")
-
-        try:
-            results = vector_store.similarity_search(
-                query=query,
-                k=top_k,
-                score_threshold=0.7,
-            )
-
-            if not results:
-                return "No relevant documents found."
-
-            output = [f"Found {len(results)} relevant documents:\n"]
-
-            for i, (doc, score) in enumerate(results, 1):
-                metadata = doc.metadata
-                source = metadata.get("source", "Unknown")
-                output.append(f"{i}. Source: {source} (relevance: {score:.2f})")
-                output.append(f"   Content: {doc.page_content[:200]}...")
-                output.append("")
-
-            return "\n".join(output)
-
-        except Exception as e:
-            logger.error(f"Document search failed: {e}")
-            return f"Error searching documents: {str(e)}"
-
-    return search_documents
-
-
-def create_multi_agent_orchestrator():
-    """
-    Create the multi-agent orchestrator using LangChain and Deep Agents.
-
-    Returns:
-        Configured agent ready to handle user queries
-    """
-    logger.info("Initializing Multi-Agent Orchestrator")
-
-    # 1. Initialize LLM (Azure OpenAI)
-    model = init_chat_model(
-        model=f"azure_openai/{config.azure_openai.gpt4o_deployment}",
+    # 1. Initialize LLM
+    model = AzureChatOpenAI(
         azure_endpoint=config.azure_openai.endpoint,
         api_key=config.azure_openai.api_key,
+        azure_deployment=config.azure_openai.gpt4o_deployment,
         api_version=config.azure_openai.api_version,
         temperature=config.llm.temperature,
         max_tokens=config.llm.max_tokens,
     )
 
-    logger.info(f"Initialized Azure OpenAI model: {config.azure_openai.gpt4o_deployment}")
+    # 2. Create tools
+    tools = []
 
-    # 2. Create Genie Agent for SQL queries
+    # Genie tool for SQL queries
     genie_tool = GenieAgent(
         genie_space_id=config.databricks.genie_space_id,
         genie_agent_name="Databricks_Genie",
         description=f"Execute natural language SQL queries on Unity Catalog. "
                    f"Has access to tables: {', '.join(config.databricks.unity_tables)}. "
-                   f"Use this for structured data questions about sales, customers, products, etc.",
+                   f"Use this for questions about data, analytics, sales, customers, products, etc.",
+    )
+    tools.append(genie_tool)
+
+    # Retriever tool for RAG (if available)
+    vectorstore = create_vector_store()
+    retriever_tool = create_retriever_tool_if_available(vectorstore)
+    if retriever_tool:
+        tools.append(retriever_tool)
+        logger.info("Added retriever tool for RAG")
+    else:
+        logger.info("No retriever tool - RAG not available")
+
+    # Bind tools to model
+    model_with_tools = model.bind_tools(tools)
+
+    # 3. Define agent node
+    def agent_node(state: MessagesState):
+        """Agent node that calls LLM with tools"""
+        messages = state["messages"]
+        response = model_with_tools.invoke(messages)
+        return {"messages": [response]}
+
+    # 4. Build graph
+    workflow = StateGraph(MessagesState)
+
+    # Add nodes
+    workflow.add_node("agent", agent_node)
+    workflow.add_node("tools", ToolNode(tools))
+
+    # Set entry point
+    workflow.set_entry_point("agent")
+
+    # Add conditional edges
+    workflow.add_conditional_edges(
+        "agent",
+        tools_condition,
     )
 
-    logger.info(f"Initialized Genie Agent: {config.databricks.genie_space_id}")
+    # Add edge from tools back to agent
+    workflow.add_edge("tools", "agent")
 
-    # 3. Create RAG retriever tool
-    rag_tool = create_rag_retriever_tool()
+    # Compile
+    graph = workflow.compile()
 
-    # 4. Collect all tools
-    tools = [genie_tool]
-
-    if rag_tool:
-        tools.append(rag_tool)
-        logger.info("Added RAG retriever tool")
-
-    # 5. Create agent with TodoListMiddleware
-    agent = create_agent(
-        model=model,
-        tools=tools,
-        middleware=[
-            TodoListMiddleware(
-                system_prompt="""
-You are a data analysis assistant with access to:
-- Databricks Genie: For querying Unity Catalog tables with natural language
-- Document search: For retrieving information from uploaded documents
-
-When given a complex task:
-1. Use write_todos to break it down into steps
-2. Execute each step using the appropriate tool
-3. Synthesize the results into a clear answer
-
-Always:
-- Be specific and data-driven in your responses
-- Cite sources (SQL queries, documents, tables)
-- If you need clarification, ask the user
-- Update todos as you make progress
-"""
-            ),
-        ],
-    )
-
-    logger.info("Multi-Agent Orchestrator initialized successfully")
-
-    return agent
+    logger.info("Agent graph created successfully")
+    return graph
 
 
 # Singleton instance
-_orchestrator: Optional[object] = None
+_agent_graph = None
 
 
-def get_orchestrator():
-    """Get or create the singleton orchestrator instance"""
-    global _orchestrator
-    if _orchestrator is None:
-        _orchestrator = create_multi_agent_orchestrator()
-    return _orchestrator
+def get_agent():
+    """Get or create singleton agent graph"""
+    global _agent_graph
+    if _agent_graph is None:
+        _agent_graph = create_agent_graph()
+    return _agent_graph
