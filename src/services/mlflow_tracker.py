@@ -2,6 +2,7 @@
 MLflow tracking service for experiment management and logging.
 """
 
+import os
 import time
 from typing import Optional, Dict, Any, List
 from contextlib import contextmanager
@@ -26,20 +27,54 @@ class MLflowTracker:
         self.active_run_id: Optional[str] = None
 
     def _setup_mlflow(self):
-        """Setup MLflow tracking"""
+        """
+        Setup MLflow tracking for Databricks.
+
+        IMPORTANT: This configures MLflow to track within Databricks workspace,
+        not locally. All experiments/runs are stored in Databricks MLflow.
+        """
         try:
-            # Set tracking URI (databricks or custom)
-            mlflow.set_tracking_uri(config.mlflow.tracking_uri)
+            # Configure for Databricks workspace tracking
+            if config.mlflow.tracking_uri == "databricks":
+                # When running from VSCode/external, use Databricks workspace host
+                tracking_uri = f"databricks://{config.databricks.host.replace('https://', '')}"
+                mlflow.set_tracking_uri(tracking_uri)
+
+                # Set Databricks authentication
+                os.environ["DATABRICKS_HOST"] = config.databricks.host
+                os.environ["DATABRICKS_TOKEN"] = config.databricks.token
+
+                logger.info(
+                    "Configured MLflow for Databricks workspace tracking",
+                    tracking_uri=tracking_uri,
+                    host=config.databricks.host
+                )
+            else:
+                # Custom tracking URI (e.g., localhost for testing)
+                mlflow.set_tracking_uri(config.mlflow.tracking_uri)
+                logger.info(f"Using custom MLflow tracking URI: {config.mlflow.tracking_uri}")
 
             # Set or create experiment
             try:
                 experiment = mlflow.get_experiment_by_name(config.mlflow.experiment_name)
                 if experiment is None:
-                    experiment_id = mlflow.create_experiment(config.mlflow.experiment_name)
-                    logger.info(f"Created MLflow experiment: {config.mlflow.experiment_name}")
+                    experiment_id = mlflow.create_experiment(
+                        config.mlflow.experiment_name,
+                        tags={
+                            "project": config.app.name,
+                            "environment": config.app.environment,
+                        }
+                    )
+                    logger.info(
+                        f"Created MLflow experiment in Databricks: {config.mlflow.experiment_name}",
+                        experiment_id=experiment_id
+                    )
                 else:
                     experiment_id = experiment.experiment_id
-                    logger.info(f"Using existing MLflow experiment: {config.mlflow.experiment_name}")
+                    logger.info(
+                        f"Using existing MLflow experiment in Databricks: {config.mlflow.experiment_name}",
+                        experiment_id=experiment_id
+                    )
 
                 mlflow.set_experiment(experiment_id=experiment_id)
 
@@ -49,9 +84,13 @@ class MLflowTracker:
 
             # Enable system metrics if configured
             if config.mlflow.enable_system_metrics:
-                mlflow.enable_system_metrics_logging()
+                try:
+                    mlflow.enable_system_metrics_logging()
+                    logger.debug("Enabled MLflow system metrics logging")
+                except Exception as e:
+                    logger.warning(f"Could not enable system metrics: {e}")
 
-            logger.info("MLflow tracking initialized successfully")
+            logger.info("✅ MLflow tracking initialized successfully for Databricks workspace")
 
         except Exception as e:
             logger.error(f"Failed to initialize MLflow: {e}")

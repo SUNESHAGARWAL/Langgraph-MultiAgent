@@ -1,9 +1,12 @@
 """
 FAISS Vector Store service for semantic search and similarity matching.
+Persists to Azure Blob Storage for production use.
 """
 
 import os
+import io
 import pickle
+import tempfile
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 
@@ -24,6 +27,8 @@ class FaissVectorStore:
     """
     FAISS-based vector store for semantic search.
     Supports multiple indices for different use cases (SQL caching, table understanding, RAG).
+
+    IMPORTANT: Persists to Azure Blob Storage (not local disk) for production scalability.
     """
 
     def __init__(self, store_name: str):
@@ -36,38 +41,100 @@ class FaissVectorStore:
         self.store_name = store_name
         self.embedding_service = get_embedding_service()
         self.dimension = config.vector_store.dimension
-        self.store_path = Path(config.vector_store.path) / store_name
+
+        # Blob storage paths
+        self.container_name = "vector-stores"
+        self.blob_prefix = f"{store_name}/"
+        self.index_blob_name = f"{self.blob_prefix}index.faiss"
+        self.docs_blob_name = f"{self.blob_prefix}documents.pkl"
+
+        # Local temp directory for FAISS operations (FAISS requires local files)
+        self.temp_dir = Path(tempfile.gettempdir()) / "faiss_temp" / store_name
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
 
         self.index: Optional[faiss.IndexFlatL2] = None
         self.documents: List[Dict[str, Any]] = []
         self.id_to_index: Dict[str, int] = {}
 
+        # Get blob storage service
+        self._storage = None
+
         self._load_or_create()
 
+    @property
+    def storage(self):
+        """Lazy load blob storage to avoid circular imports"""
+        if self._storage is None:
+            from src.services.storage import get_blob_storage
+            self._storage = get_blob_storage()
+        return self._storage
+
     def _load_or_create(self):
-        """Load existing index or create new one"""
-        self.store_path.mkdir(parents=True, exist_ok=True)
+        """Load existing index from Azure Blob Storage or create new one"""
+        try:
+            # Try to download from blob storage
+            index_exists = self._download_from_blob()
 
-        index_file = self.store_path / "index.faiss"
-        docs_file = self.store_path / "documents.pkl"
+            if index_exists:
+                # Load from local temp files
+                index_file = self.temp_dir / "index.faiss"
+                docs_file = self.temp_dir / "documents.pkl"
 
-        if index_file.exists() and docs_file.exists():
-            try:
-                self.index = faiss.read_index(str(index_file))
-                with open(docs_file, "rb") as f:
-                    data = pickle.load(f)
-                    self.documents = data["documents"]
-                    self.id_to_index = data["id_to_index"]
+                if index_file.exists() and docs_file.exists():
+                    try:
+                        self.index = faiss.read_index(str(index_file))
+                        with open(docs_file, "rb") as f:
+                            data = pickle.load(f)
+                            self.documents = data["documents"]
+                            self.id_to_index = data["id_to_index"]
 
-                logger.info(
-                    f"Loaded {self.store_name} vector store",
-                    num_documents=len(self.documents),
-                )
-            except Exception as e:
-                logger.warning(f"Failed to load index, creating new: {e}")
-                self._create_new_index()
-        else:
+                        logger.info(
+                            f"Loaded {self.store_name} vector store from Azure Blob Storage",
+                            num_documents=len(self.documents),
+                        )
+                        return
+                    except Exception as e:
+                        logger.warning(f"Failed to load index from blob, creating new: {e}")
+
+            # Create new index if loading failed
             self._create_new_index()
+
+        except Exception as e:
+            logger.warning(f"Could not access blob storage, creating new index: {e}")
+            self._create_new_index()
+
+    def _download_from_blob(self) -> bool:
+        """
+        Download vector store files from Azure Blob Storage to temp directory.
+
+        Returns:
+            True if files were downloaded successfully, False otherwise
+        """
+        try:
+            # Download index file
+            index_data = self.storage.download_blob(self.container_name, self.index_blob_name)
+            if index_data:
+                index_file = self.temp_dir / "index.faiss"
+                with open(index_file, "wb") as f:
+                    f.write(index_data)
+                logger.debug(f"Downloaded index for {self.store_name} from blob storage")
+            else:
+                return False
+
+            # Download documents file
+            docs_data = self.storage.download_blob(self.container_name, self.docs_blob_name)
+            if docs_data:
+                docs_file = self.temp_dir / "documents.pkl"
+                with open(docs_file, "wb") as f:
+                    f.write(docs_data)
+                logger.debug(f"Downloaded documents for {self.store_name} from blob storage")
+                return True
+            else:
+                return False
+
+        except Exception as e:
+            logger.debug(f"Could not download from blob storage: {e}")
+            return False
 
     def _create_new_index(self):
         """Create a new FAISS index"""
@@ -200,12 +267,21 @@ class FaissVectorStore:
         return False
 
     def save(self):
-        """Persist index to disk"""
-        try:
-            self.store_path.mkdir(parents=True, exist_ok=True)
+        """
+        Persist index to Azure Blob Storage.
 
-            index_file = self.store_path / "index.faiss"
-            docs_file = self.store_path / "documents.pkl"
+        Process:
+        1. Write FAISS index and documents to temp directory
+        2. Upload to Azure Blob Storage
+        3. Clean up temp files
+        """
+        try:
+            # Ensure temp directory exists
+            self.temp_dir.mkdir(parents=True, exist_ok=True)
+
+            # Write to temp files (FAISS requires local files)
+            index_file = self.temp_dir / "index.faiss"
+            docs_file = self.temp_dir / "documents.pkl"
 
             faiss.write_index(self.index, str(index_file))
 
@@ -218,10 +294,31 @@ class FaissVectorStore:
                     f,
                 )
 
-            logger.info(f"Saved {self.store_name} vector store to disk")
+            # Upload to Azure Blob Storage
+            with open(index_file, "rb") as f:
+                index_data = f.read()
+                self.storage.upload_blob(
+                    self.container_name,
+                    self.index_blob_name,
+                    index_data
+                )
+
+            with open(docs_file, "rb") as f:
+                docs_data = f.read()
+                self.storage.upload_blob(
+                    self.container_name,
+                    self.docs_blob_name,
+                    docs_data
+                )
+
+            logger.info(
+                f"Saved {self.store_name} vector store to Azure Blob Storage",
+                container=self.container_name,
+                num_documents=len(self.documents)
+            )
 
         except Exception as e:
-            logger.error(f"Failed to save vector store: {e}")
+            logger.error(f"Failed to save vector store to blob storage: {e}")
             raise
 
     def clear(self):
@@ -239,6 +336,8 @@ class FaissVectorStore:
             "active_documents": len(active_docs),
             "index_size": self.index.ntotal if self.index else 0,
             "dimension": self.dimension,
+            "storage_location": "Azure Blob Storage",
+            "container": self.container_name,
         }
 
 
@@ -257,10 +356,10 @@ class VectorStoreManager:
         return self.stores[store_name]
 
     def save_all(self):
-        """Save all vector stores"""
+        """Save all vector stores to Azure Blob Storage"""
         for store in self.stores.values():
             store.save()
-        logger.info("Saved all vector stores")
+        logger.info("Saved all vector stores to Azure Blob Storage")
 
     def get_all_stats(self) -> Dict[str, Dict[str, Any]]:
         """Get statistics for all vector stores"""
