@@ -42,7 +42,11 @@ print("-" * 80)
 
 try:
     from databricks import sdk
-    print(f"✅ Databricks SDK version: {sdk.__version__}")
+    try:
+        version = sdk.__version__
+        print(f"✅ Databricks SDK version: {version}")
+    except AttributeError:
+        print(f"✅ Databricks SDK installed (version info not available)")
 
     from databricks.sdk import WorkspaceClient
     print(f"✅ WorkspaceClient available")
