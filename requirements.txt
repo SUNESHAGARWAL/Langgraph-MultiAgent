@@ -36,8 +36,10 @@ openpyxl>=3.1.0
 python-pptx>=1.0.0
 
 # Document Processing for RAG
-unstructured>=0.16.0
-unstructured[pdf,docx,pptx]>=0.16.0
+# Note: Using minimal unstructured for Python 3.11 compatibility
+# Skipping unstructured due to numba compatibility issues with Python 3.11
+# Using individual parsers instead
+# unstructured[pdf,docx,pptx]>=0.18.0  # Commented out due to Python 3.11 incompatibility
 
 # Tracing and Observability
 opentelemetry-api>=1.28.0
