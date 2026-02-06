@@ -47,8 +47,12 @@ class BlobMonitorService:
             on_file_callback: Callback function when new file detected
             poll_interval: How often to check for new blobs (seconds)
         """
-        self.container_name = container_name or config.azure_storage.container_rag
-        self.blob_prefix = blob_prefix
+        # Get RAG container and prefix from config
+        rag_container, rag_prefix_default = config.azure_storage.get_rag_config()
+
+        self.container_name = container_name or rag_container
+        # Use provided prefix, or default from config, or empty string
+        self.blob_prefix = blob_prefix if blob_prefix else (rag_prefix_default or "")
         self.on_file_callback = on_file_callback
         self.poll_interval = poll_interval if poll_interval is not None else config.rag.poll_interval
 

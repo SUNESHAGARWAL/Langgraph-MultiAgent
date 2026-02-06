@@ -29,11 +29,12 @@ class AzureBlobStorage:
 
     def _ensure_containers(self):
         """Ensure all required containers exist"""
-        containers = [
-            config.azure_storage.container_cache,
-            config.azure_storage.container_rag,
-            config.azure_storage.container_eda,
-        ]
+        # Get unique container names (may share same container with different prefixes)
+        cache_container, _ = config.azure_storage.get_cache_config()
+        rag_container, _ = config.azure_storage.get_rag_config()
+        eda_container, _ = config.azure_storage.get_eda_config()
+
+        containers = set([cache_container, rag_container, eda_container])
 
         for container_name in containers:
             try:
@@ -196,14 +197,19 @@ class AzureBlobStorage:
 
     def save_cache(self, key: str, data: Any, ttl_seconds: Optional[int] = None):
         """Save to cache container"""
+        cache_container, cache_prefix = config.azure_storage.get_cache_config()
+
         metadata = {}
         if ttl_seconds:
             expiry = datetime.utcnow() + timedelta(seconds=ttl_seconds)
             metadata["expiry"] = expiry.isoformat()
 
+        # Build blob path with prefix
+        blob_path = f"{cache_prefix}/cache/{key}.json" if cache_prefix else f"cache/{key}.json"
+
         self.upload_blob(
-            config.azure_storage.container_cache,
-            f"cache/{key}.json",
+            cache_container,
+            blob_path,
             data,
             serialize="json",
             metadata=metadata,
@@ -211,12 +217,13 @@ class AzureBlobStorage:
 
     def load_cache(self, key: str) -> Optional[Any]:
         """Load from cache container"""
-        blob_name = f"cache/{key}.json"
+        cache_container, cache_prefix = config.azure_storage.get_cache_config()
+        blob_path = f"{cache_prefix}/cache/{key}.json" if cache_prefix else f"cache/{key}.json"
 
         # Check if expired
         try:
             blob_client = self.blob_service_client.get_blob_client(
-                container=config.azure_storage.container_cache, blob=blob_name
+                container=cache_container, blob=blob_path
             )
             props = blob_client.get_blob_properties()
             metadata = props.metadata
@@ -224,43 +231,51 @@ class AzureBlobStorage:
             if metadata and "expiry" in metadata:
                 expiry = datetime.fromisoformat(metadata["expiry"])
                 if datetime.utcnow() > expiry:
-                    self.delete_blob(config.azure_storage.container_cache, blob_name)
+                    self.delete_blob(cache_container, blob_path)
                     return None
 
         except ResourceNotFoundError:
             return None
 
-        return self.download_blob(config.azure_storage.container_cache, blob_name)
+        return self.download_blob(cache_container, blob_path)
 
     def save_eda_results(self, table_name: str, results: dict):
         """Save EDA results for a table"""
+        eda_container, eda_prefix = config.azure_storage.get_eda_config()
+        blob_path = f"{eda_prefix}/eda/{table_name}.json" if eda_prefix else f"eda/{table_name}.json"
+
         self.upload_blob(
-            config.azure_storage.container_eda,
-            f"eda/{table_name}.json",
+            eda_container,
+            blob_path,
             results,
             serialize="json",
         )
 
     def load_eda_results(self, table_name: str) -> Optional[dict]:
         """Load EDA results for a table"""
-        return self.download_blob(
-            config.azure_storage.container_eda, f"eda/{table_name}.json"
-        )
+        eda_container, eda_prefix = config.azure_storage.get_eda_config()
+        blob_path = f"{eda_prefix}/eda/{table_name}.json" if eda_prefix else f"eda/{table_name}.json"
+
+        return self.download_blob(eda_container, blob_path)
 
     def save_rag_metadata(self, file_name: str, metadata: dict):
         """Save RAG file metadata"""
+        rag_container, rag_prefix = config.azure_storage.get_rag_config()
+        blob_path = f"{rag_prefix}/metadata/{file_name}.json" if rag_prefix else f"metadata/{file_name}.json"
+
         self.upload_blob(
-            config.azure_storage.container_rag,
-            f"metadata/{file_name}.json",
+            rag_container,
+            blob_path,
             metadata,
             serialize="json",
         )
 
     def load_rag_metadata(self, file_name: str) -> Optional[dict]:
         """Load RAG file metadata"""
-        return self.download_blob(
-            config.azure_storage.container_rag, f"metadata/{file_name}.json"
-        )
+        rag_container, rag_prefix = config.azure_storage.get_rag_config()
+        blob_path = f"{rag_prefix}/metadata/{file_name}.json" if rag_prefix else f"metadata/{file_name}.json"
+
+        return self.download_blob(rag_container, blob_path)
 
 
 # Global storage instance

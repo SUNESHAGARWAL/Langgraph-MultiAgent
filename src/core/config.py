@@ -51,12 +51,65 @@ class DatabricksConfig(BaseSettings):
 
 
 class AzureStorageConfig(BaseSettings):
-    """Azure Blob Storage Configuration"""
+    """
+    Azure Blob Storage Configuration
+
+    IMPORTANT: Supports two patterns:
+    1. Separate containers: container_cache=agent-cache, container_rag=agent-rag-docs
+    2. Single container with prefixes: container_cache=reservoir/adm/CXEngine/agent-cache
+
+    Pattern 2 will automatically extract container name and blob prefix.
+    """
 
     connection_string: str = Field(..., alias="AZURE_STORAGE_CONNECTION_STRING")
+
+    # These can be either:
+    # - Just container name: "agent-cache"
+    # - Container + path: "reservoir/adm/CXEngine/agent-cache"
     container_cache: str = Field(default="agent-cache", alias="AZURE_STORAGE_CONTAINER_CACHE")
     container_rag: str = Field(default="agent-rag-docs", alias="AZURE_STORAGE_CONTAINER_RAG")
     container_eda: str = Field(default="agent-eda-results", alias="AZURE_STORAGE_CONTAINER_EDA")
+
+    # Parsed values (set automatically)
+    _cache_container: Optional[str] = None
+    _cache_prefix: Optional[str] = None
+    _rag_container: Optional[str] = None
+    _rag_prefix: Optional[str] = None
+    _eda_container: Optional[str] = None
+    _eda_prefix: Optional[str] = None
+
+    def __init__(self, **data):
+        super().__init__(**data)
+        # Parse container/prefix patterns
+        self._cache_container, self._cache_prefix = self._parse_container_path(self.container_cache)
+        self._rag_container, self._rag_prefix = self._parse_container_path(self.container_rag)
+        self._eda_container, self._eda_prefix = self._parse_container_path(self.container_eda)
+
+    @staticmethod
+    def _parse_container_path(value: str) -> tuple[str, str]:
+        """
+        Parse container path into container name and blob prefix.
+
+        Examples:
+        - "agent-cache" → ("agent-cache", "")
+        - "reservoir/adm/CXEngine/agent-cache" → ("reservoir", "adm/CXEngine/agent-cache")
+        """
+        if "/" in value:
+            parts = value.split("/", 1)
+            return parts[0], parts[1]
+        return value, ""
+
+    def get_cache_config(self) -> tuple[str, str]:
+        """Returns (container_name, blob_prefix) for cache"""
+        return self._cache_container, self._cache_prefix
+
+    def get_rag_config(self) -> tuple[str, str]:
+        """Returns (container_name, blob_prefix) for RAG"""
+        return self._rag_container, self._rag_prefix
+
+    def get_eda_config(self) -> tuple[str, str]:
+        """Returns (container_name, blob_prefix) for EDA"""
+        return self._eda_container, self._eda_prefix
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
