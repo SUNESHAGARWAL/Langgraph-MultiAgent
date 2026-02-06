@@ -1,18 +1,20 @@
 """
-Main entry point for Multi-Agent Orchestrator System.
+Main entry point for Multi-Agent Orchestrator System
+
+Uses LangChain Deep Agents with:
+- Databricks Genie for SQL queries
+- Vector Search for RAG
+- TodoListMiddleware for planning
+- Azure Blob Storage for document monitoring
 """
 
 import uuid
 import time
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional
 
 from src.core.config import config
-from src.core.state import create_initial_state
-from src.agents.orchestrator import get_orchestrator
-from src.agents.synthesis_agent import get_synthesis_agent
-from src.agents.human_loop import get_human_loop_agent
-from src.agents.rag_agent import get_rag_agent
-from src.agents.table_understanding import get_table_understanding_agent
+from src.agent import get_orchestrator
+from src.services.blob_monitor import get_blob_monitor
 from src.services.mlflow_tracker import get_mlflow_tracker
 from src.utils.logging import get_logger, set_session_id, set_request_id
 
@@ -21,37 +23,38 @@ logger = get_logger(__name__)
 
 class MultiAgentOrchestrator:
     """
-    Main orchestrator for the multi-agent system.
-    Provides a simple interface for querying the system.
+    Multi-agent orchestrator using LangChain Deep Agents.
+
+    Provides a simple interface for:
+    - Querying data via natural language (Genie)
+    - Retrieving documents (RAG)
+    - Task planning and execution (TodoListMiddleware)
     """
 
-    def __init__(self, auto_start_rag: bool = True):
+    def __init__(self, auto_start_monitoring: bool = True):
         """
         Initialize the multi-agent orchestrator.
 
         Args:
-            auto_start_rag: Whether to automatically start RAG file monitoring
+            auto_start_monitoring: Whether to start Azure Blob monitoring for RAG
         """
         logger.info("Initializing Multi-Agent Orchestrator")
 
-        # Initialize all agents
-        self.orchestrator = get_orchestrator()
-        self.synthesis_agent = get_synthesis_agent()
-        self.human_loop = get_human_loop_agent()
-        self.rag_agent = get_rag_agent()
-        self.table_agent = get_table_understanding_agent()
+        # Get the Deep Agent
+        self.agent = get_orchestrator()
+
+        # MLflow tracking
         self.tracker = get_mlflow_tracker()
 
-        # Start RAG monitoring if enabled
-        if auto_start_rag and config.rag.auto_process:
+        # Start Azure Blob monitoring for RAG documents
+        if auto_start_monitoring and config.rag.auto_process:
             try:
-                self.rag_agent.start_monitoring()
-                logger.info("Started RAG file monitoring")
+                self.blob_monitor = get_blob_monitor()
+                self.blob_monitor.start()
+                logger.info("Started Azure Blob Storage monitoring for RAG")
             except Exception as e:
-                logger.warning(f"Failed to start RAG monitoring: {e}")
-
-        # Session management
-        self.sessions: Dict[str, Dict[str, Any]] = {}
+                logger.warning(f"Failed to start blob monitoring: {e}")
+                self.blob_monitor = None
 
         logger.info("Multi-Agent Orchestrator initialized successfully")
 
@@ -59,333 +62,191 @@ class MultiAgentOrchestrator:
         self,
         question: str,
         session_id: Optional[str] = None,
-        conversation_history: Optional[List[Dict]] = None,
+        stream: bool = False,
     ) -> Dict[str, Any]:
         """
-        Process a user query through the multi-agent system.
+        Query the multi-agent system.
 
         Args:
-            question: User question
-            session_id: Optional session ID (will create new if not provided)
-            conversation_history: Optional conversation history
+            question: Natural language question
+            session_id: Optional session ID for conversation tracking
+            stream: Whether to stream the response (not yet implemented)
 
         Returns:
-            Response dictionary with answer and metadata
+            Dict containing:
+            - success: bool
+            - answer: str (the response)
+            - todos: list (task breakdown if applicable)
+            - latency: float (seconds)
+            - sources: list (data sources used)
+            - session_id: str
+            - request_id: str
         """
-        # Generate session ID if not provided
+        # Generate IDs
         if session_id is None:
             session_id = str(uuid.uuid4())
-
         request_id = str(uuid.uuid4())
 
-        # Set context for logging
         set_session_id(session_id)
         set_request_id(request_id)
 
+        start_time = time.time()
+
         logger.info(
-            "Processing query",
+            f"Processing query",
             question=question,
             session_id=session_id,
             request_id=request_id,
         )
 
-        # Get or create session
-        if session_id not in self.sessions:
-            self.sessions[session_id] = {
-                "conversation_history": conversation_history or [],
-                "created_at": time.time(),
-            }
-
-        session = self.sessions[session_id]
-
         # Start MLflow run
-        with self.tracker.start_run(
-            run_name=f"query_{request_id[:8]}",
-            tags={
-                "session_id": session_id,
-                "request_id": request_id,
-            },
-        ):
+        run_name = f"query_{request_id[:8]}"
+        with self.tracker.start_run(run_name=run_name):
+            self.tracker.log_params({"question": question, "session_id": session_id})
+
             try:
-                # Log parameters
-                self.tracker.log_params({
-                    "question": question[:100],  # Truncate for MLflow
-                    "session_id": session_id,
-                    "has_history": len(session["conversation_history"]) > 0,
+                # Invoke the agent
+                result = self.agent.invoke({
+                    "messages": [{"role": "user", "content": question}]
                 })
 
-                # Orchestrate
-                start_time = time.time()
+                # Extract response
+                # Note: Actual response format depends on LangChain agent implementation
+                # Adjust based on actual structure
+                answer = result.get("output", str(result))
+                todos = result.get("todos", [])
 
-                orchestration_result = self.orchestrator.orchestrate(
-                    question=question,
-                    conversation_history=session["conversation_history"],
-                    context={"session_id": session_id},
+                latency = time.time() - start_time
+
+                # Log metrics
+                self.tracker.log_metrics({
+                    "latency_seconds": latency,
+                    "success": 1,
+                })
+
+                logger.info(
+                    f"Query succeeded",
+                    latency=latency,
+                    session_id=session_id,
+                    request_id=request_id,
                 )
 
-                # Check if needs clarification
-                if orchestration_result.get("needs_clarification"):
-                    clarification_q = orchestration_result["clarification_question"]
-
-                    logger.info("Needs clarification from user")
-
-                    return {
-                        "success": False,
-                        "needs_clarification": True,
-                        "clarification_question": clarification_q,
-                        "session_id": session_id,
-                        "request_id": request_id,
-                    }
-
-                # Synthesize final answer
-                if orchestration_result["success"]:
-                    synthesis_result = self.synthesis_agent.synthesize(
-                        question=question,
-                        agent_results=orchestration_result.get("result", {}),
-                        execution_log=orchestration_result.get("execution_log", []),
-                        conversation_history=session["conversation_history"],
-                    )
-
-                    latency = time.time() - start_time
-
-                    # Log metrics
-                    self.tracker.log_metrics({
-                        "latency_seconds": latency,
-                        "iterations": orchestration_result.get("iterations", 0),
-                        "success": 1.0,
-                    })
-
-                    # Update conversation history
-                    session["conversation_history"].append({
-                        "role": "user",
-                        "content": question,
-                    })
-                    session["conversation_history"].append({
-                        "role": "assistant",
-                        "content": synthesis_result["answer"],
-                    })
-
-                    logger.info(
-                        "Query completed successfully",
-                        latency=latency,
-                        iterations=orchestration_result.get("iterations"),
-                    )
-
-                    return {
-                        "success": True,
-                        "answer": synthesis_result["answer"],
-                        "sources": synthesis_result.get("sources_used", []),
-                        "plan": orchestration_result.get("plan"),
-                        "execution_log": orchestration_result.get("execution_log"),
-                        "iterations": orchestration_result.get("iterations"),
-                        "latency": latency,
-                        "session_id": session_id,
-                        "request_id": request_id,
-                    }
-
-                else:
-                    # Orchestration failed
-                    error_msg = orchestration_result.get("error", "Unknown error")
-
-                    logger.error(f"Orchestration failed: {error_msg}")
-
-                    self.tracker.log_metrics({
-                        "success": 0.0,
-                    })
-
-                    return {
-                        "success": False,
-                        "error": error_msg,
-                        "execution_log": orchestration_result.get("execution_log"),
-                        "session_id": session_id,
-                        "request_id": request_id,
-                    }
-
-            except Exception as e:
-                logger.error(f"Query processing failed: {e}", exc_info=True)
-
-                self.tracker.log_metrics({
-                    "success": 0.0,
-                    "error": 1.0,
-                })
-
                 return {
-                    "success": False,
-                    "error": str(e),
+                    "success": True,
+                    "answer": answer,
+                    "todos": todos,
+                    "latency": latency,
+                    "sources": self._extract_sources(result),
                     "session_id": session_id,
                     "request_id": request_id,
                 }
 
-    def provide_clarification(
-        self,
-        session_id: str,
-        clarification: str,
-    ) -> Dict[str, Any]:
-        """
-        Provide clarification to a previous query that needed more information.
+            except Exception as e:
+                latency = time.time() - start_time
 
-        Args:
-            session_id: Session ID
-            clarification: User's clarification
+                self.tracker.log_metrics({
+                    "latency_seconds": latency,
+                    "success": 0,
+                })
 
-        Returns:
-            Response dictionary
-        """
-        logger.info(
-            "Received clarification",
-            session_id=session_id,
-            clarification=clarification,
-        )
+                logger.error(
+                    f"Query failed",
+                    error=str(e),
+                    latency=latency,
+                    session_id=session_id,
+                    request_id=request_id,
+                )
 
-        # Get the original question from session
-        if session_id not in self.sessions:
-            return {
-                "success": False,
-                "error": "Session not found",
-            }
+                return {
+                    "success": False,
+                    "error": str(e),
+                    "latency": latency,
+                    "session_id": session_id,
+                    "request_id": request_id,
+                }
 
-        # Re-query with clarification added to context
-        session = self.sessions[session_id]
-        last_user_msg = None
+    def _extract_sources(self, result: Dict[str, Any]) -> list:
+        """Extract data sources used from agent result"""
+        sources = []
 
-        for msg in reversed(session["conversation_history"]):
-            if msg["role"] == "user":
-                last_user_msg = msg["content"]
-                break
+        # Check if Genie was used
+        if "genie" in str(result).lower() or "sql" in str(result).lower():
+            sources.append("Databricks Genie (SQL)")
 
-        if last_user_msg is None:
-            return {
-                "success": False,
-                "error": "No previous question found in session",
-            }
+        # Check if documents were retrieved
+        if "document" in str(result).lower() or "search" in str(result).lower():
+            sources.append("RAG Documents")
 
-        # Append clarification to conversation history
-        session["conversation_history"].append({
-            "role": "user",
-            "content": f"Clarification: {clarification}",
-        })
-
-        # Re-run query with updated history
-        combined_question = f"{last_user_msg}\n\nAdditional context: {clarification}"
-
-        return self.query(
-            question=combined_question,
-            session_id=session_id,
-            conversation_history=session["conversation_history"],
-        )
-
-    def analyze_tables(self, force_refresh: bool = False) -> Dict[str, Any]:
-        """
-        Analyze all Unity Catalog tables.
-
-        Args:
-            force_refresh: Force re-analysis
-
-        Returns:
-            Analysis summary
-        """
-        logger.info("Starting table analysis", force_refresh=force_refresh)
-
-        result = self.table_agent.analyze_all_tables(force_refresh=force_refresh)
-
-        logger.info(
-            "Table analysis complete",
-            successful=len(result.get("analyzed_tables", [])),
-            failed=len(result.get("failed_tables", [])),
-        )
-
-        return result
-
-    def get_stats(self) -> Dict[str, Any]:
-        """Get system statistics"""
-        return {
-            "rag_stats": self.rag_agent.get_stats(),
-            "active_sessions": len(self.sessions),
-            "app_config": {
-                "name": config.app.name,
-                "version": config.app.version,
-                "environment": config.app.environment,
-            },
-        }
+        return sources if sources else ["Agent"]
 
     def cleanup(self):
         """Cleanup resources"""
-        logger.info("Cleaning up orchestrator")
-
-        # Stop RAG monitoring
-        self.rag_agent.stop_monitoring()
-
-        logger.info("Cleanup complete")
+        if hasattr(self, 'blob_monitor') and self.blob_monitor:
+            try:
+                self.blob_monitor.stop()
+                logger.info("Stopped blob monitoring")
+            except Exception as e:
+                logger.warning(f"Error stopping blob monitor: {e}")
 
 
 def main():
-    """Simple CLI interface"""
-    print(f"""
-╔═══════════════════════════════════════════════════════════╗
-║   Multi-Agent Orchestrator v{config.app.version}                     ║
-║   Environment: {config.app.environment}                             ║
-╚═══════════════════════════════════════════════════════════╝
-    """)
+    """
+    CLI entry point for interactive queries.
+    """
+    print("=" * 80)
+    print("Multi-Agent Orchestrator v1.0.0 (LangChain Deep Agents)")
+    print("=" * 80)
+    print()
 
     # Initialize orchestrator
-    orchestrator = MultiAgentOrchestrator(auto_start_rag=True)
+    try:
+        orchestrator = MultiAgentOrchestrator(auto_start_monitoring=True)
+        print("✅ System initialized successfully\n")
+    except Exception as e:
+        print(f"❌ Failed to initialize system: {e}")
+        return
 
-    # Analyze tables if configured
-    if config.databricks.unity_tables:
-        print("\n📊 Analyzing Unity Catalog tables...")
-        result = orchestrator.analyze_tables()
-        print(f"✓ Analyzed {len(result['analyzed_tables'])} tables")
-
-    print("\n💬 Ready for questions! (type 'exit' to quit)\n")
-
-    session_id = str(uuid.uuid4())
+    # Interactive CLI
+    print("💬 Ready for questions! (type 'exit' to quit)")
+    print()
 
     try:
         while True:
-            question = input("\n🤔 You: ").strip()
+            # Get user input
+            question = input("🤔 You: ").strip()
 
             if not question:
                 continue
 
-            if question.lower() in ["exit", "quit", "bye"]:
+            if question.lower() in ["exit", "quit", "q"]:
                 print("\n👋 Goodbye!")
                 break
 
-            if question.lower() == "stats":
-                stats = orchestrator.get_stats()
-                print(f"\n📊 Stats: {stats}")
-                continue
-
             # Process query
-            print("\n🤖 Processing...")
+            print("\n🤖 Processing...\n")
 
-            result = orchestrator.query(question, session_id=session_id)
-
-            if result.get("needs_clarification"):
-                print(f"\n🤔 {result['clarification_question']}")
-
-                clarification = input("\n🤔 You: ").strip()
-
-                if clarification:
-                    result = orchestrator.provide_clarification(
-                        session_id=session_id,
-                        clarification=clarification,
-                    )
+            result = orchestrator.query(question=question)
 
             if result["success"]:
-                print(f"\n✨ Answer:\n{result['answer']}")
+                print("✨ Answer:")
+                print(result["answer"])
+                print()
 
-                if result.get("sources"):
-                    print(f"\n📚 Sources: {', '.join(result['sources'])}")
+                if result.get("todos"):
+                    print("📋 Task Breakdown:")
+                    for i, todo in enumerate(result["todos"], 1):
+                        print(f"  {i}. {todo}")
+                    print()
 
-                print(f"\n⏱️ Latency: {result.get('latency', 0):.2f}s")
-
+                print(f"📚 Sources: {', '.join(result['sources'])}")
+                print(f"⏱️  Latency: {result['latency']:.2f}s")
             else:
-                print(f"\n❌ Error: {result.get('error')}")
+                print(f"❌ Error: {result['error']}")
+
+            print()
 
     except KeyboardInterrupt:
         print("\n\n👋 Interrupted. Goodbye!")
-
     finally:
         orchestrator.cleanup()
 
