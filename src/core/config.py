@@ -136,8 +136,19 @@ class CacheConfig(BaseSettings):
     """Caching Configuration"""
 
     ttl_seconds: int = Field(default=3600, alias="CACHE_TTL_SECONDS")
-    similarity_threshold: float = Field(default=0.85, alias="CACHE_SIMILARITY_THRESHOLD")
+    ttl_hours: int = Field(default=24, alias="CACHE_TTL_HOURS")
+    similarity_threshold: float = Field(default=0.90, alias="CACHE_SIMILARITY_THRESHOLD")
     max_entries: int = Field(default=10000, alias="CACHE_MAX_ENTRIES")
+    cache_dir: str = Field(default="./data/cache", alias="CACHE_DIR")
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+
+class DatabaseConfig(BaseSettings):
+    """Database Configuration for Persistent Memory"""
+
+    postgres_url: Optional[str] = Field(default=None, alias="POSTGRES_URL")
+    use_persistent_memory: bool = Field(default=False, alias="USE_PERSISTENT_MEMORY")
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -266,6 +277,7 @@ class Config:
         self.azure_storage = AzureStorageConfig()
         self.redis = RedisConfig()
         self.cache = CacheConfig()
+        self.database = DatabaseConfig()
         self.vector_store = VectorStoreConfig()
         self.rag = RAGConfig()
         self.mlflow = MLflowConfig()
