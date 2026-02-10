@@ -253,8 +253,29 @@ def create_rag_agent() -> Optional[Any]:
             api_version=config.azure_openai.api_version,
         )
 
-        # Create FAISS vector store
-        vectorstore = FAISS.from_documents(splits, embeddings)
+        # Create or load FAISS vector store (PERSISTENT)
+        import os
+        faiss_index_path = "./data/faiss_rag_index"
+
+        if os.path.exists(f"{faiss_index_path}/index.faiss"):
+            # Load existing FAISS index
+            logger.info(f"Loading existing FAISS index from {faiss_index_path}")
+            vectorstore = FAISS.load_local(
+                faiss_index_path,
+                embeddings,
+                allow_dangerous_deserialization=True  # We trust our own index
+            )
+            logger.info(f"✓ Loaded FAISS index with {vectorstore.index.ntotal} vectors")
+        else:
+            # Create new FAISS index
+            logger.info("Creating new FAISS index from documents")
+            vectorstore = FAISS.from_documents(splits, embeddings)
+
+            # Save index for persistence
+            os.makedirs(faiss_index_path, exist_ok=True)
+            vectorstore.save_local(faiss_index_path)
+            logger.info(f"✓ Saved FAISS index to {faiss_index_path}")
+
         retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
 
         # Create retriever tool

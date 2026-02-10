@@ -56,6 +56,10 @@ class QueryMetrics:
     validation_failed: int = 0
     validation_partial: int = 0
 
+    # Versioning (NEW)
+    model_version: str = "3.0.0"  # Model version used
+    experiment_id: Optional[str] = None  # A/B test experiment ID
+
     def duration(self) -> float:
         """Calculate query duration in seconds."""
         if self.end_time:
@@ -109,7 +113,9 @@ class MetricsTracker:
         self,
         query_id: str,
         question: str,
-        thread_id: str
+        thread_id: str,
+        model_version: str = "3.0.0",
+        experiment_id: Optional[str] = None
     ) -> QueryMetrics:
         """
         Start tracking a new query.
@@ -118,6 +124,8 @@ class MetricsTracker:
             query_id: Unique query identifier
             question: User question
             thread_id: Conversation thread ID
+            model_version: Model version used (for A/B testing)
+            experiment_id: Optional experiment ID (for A/B testing)
 
         Returns:
             QueryMetrics instance
@@ -127,13 +135,15 @@ class MetricsTracker:
                 query_id=query_id,
                 question=question,
                 thread_id=thread_id,
-                start_time=time.time()
+                start_time=time.time(),
+                model_version=model_version,
+                experiment_id=experiment_id
             )
 
             self._metrics_store[query_id] = metrics
             self._total_queries += 1
 
-            logger.debug(f"Started tracking query: {query_id}")
+            logger.debug(f"Started tracking query: {query_id} (version={model_version})")
 
             return metrics
 
