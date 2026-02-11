@@ -178,6 +178,11 @@ def create_schema_analysis_agent(schema_reader: UnitySchemaReader, llm: AzureCha
 
 Your task is to understand the USER'S INTENT and match it to available data using SEMANTIC UNDERSTANDING.
 
+CRITICAL: DO NOT make assumptions about data availability! Only look at the schema metadata provided.
+- If user mentions October 2025 and you don't see date range info in schema → ASK for clarification
+- DO NOT say "data only available up to October 2023" unless schema explicitly says so
+- The schema shows column STRUCTURE, not data CONTENTS
+
 INSTRUCTIONS:
 
 1. READ THE COLUMN DESCRIPTIONS CAREFULLY
@@ -264,7 +269,9 @@ Now analyze:"""
                         clarification = parts[1].strip()
 
                 # Format nice clarification message
-                clarification_msg = f"""I found data that matches your question, but I need some clarification:
+                clarification_msg = f"""[Schema Analysis Complete - Needs Clarification]
+
+I found data that matches your question, but I need some clarification:
 
 {clarification}
 
@@ -682,14 +689,27 @@ def create_supervisor_node(llm: AzureChatOpenAI):
                     return {"next_agent": "schema"}
 
         # Check what's been done
-        has_schema_analysis = any("Schema Analysis" in str(msg.content) for msg in messages if isinstance(msg, AIMessage))
+        has_schema_analysis = any(
+            "Schema Analysis" in str(msg.content) or "[Schema Analysis Complete" in str(msg.content)
+            for msg in messages if isinstance(msg, AIMessage)
+        )
         has_query_plan = any("Query Plan" in str(msg.content) for msg in messages if isinstance(msg, AIMessage))
         has_genie_results = any("Genie Results" in str(msg.content) for msg in messages if isinstance(msg, AIMessage))
+
+        # Check if waiting for clarification
+        needs_clarification = any(
+            "Needs Clarification" in str(msg.content) or "need some clarification" in str(msg.content)
+            for msg in messages if isinstance(msg, AIMessage)
+        )
 
         # Routing logic
         if not has_schema_analysis:
             logger.info("→ Routing to: schema (no analysis yet)")
             return {"next_agent": "schema"}
+
+        if needs_clarification and is_answerable == False:
+            logger.info("→ Routing to: human (needs clarification)")
+            return {"next_agent": "human"}
 
         if is_answerable == False:
             logger.info("→ Routing to: human (not answerable)")
