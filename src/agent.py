@@ -19,7 +19,10 @@ try:
     from langchain_text_splitters import RecursiveCharacterTextSplitter
 except ImportError:
     from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.tools.retriever import create_retriever_tool
+try:
+    from langchain_core.tools import create_retriever_tool
+except ImportError:
+    from langchain.tools.retriever import create_retriever_tool
 from langgraph.graph import StateGraph, MessagesState, END
 from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.memory import MemorySaver
