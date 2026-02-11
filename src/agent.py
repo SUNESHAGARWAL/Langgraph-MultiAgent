@@ -155,8 +155,8 @@ def create_supervisor_agent(agents: list):
         api_key=config.azure_openai.api_key,
         azure_deployment=config.azure_openai.gpt4o_deployment,
         api_version=config.azure_openai.api_version,
-        temperature=config.llm.temperature,
-        max_tokens=config.llm.max_tokens,
+        temperature=config.azure_openai.temperature,
+        max_tokens=config.azure_openai.max_tokens,
     )
 
     # Available agent names
