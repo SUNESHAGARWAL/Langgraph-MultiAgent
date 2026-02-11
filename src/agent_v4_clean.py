@@ -245,11 +245,32 @@ Analyze this question carefully:
 4. What information is missing (time period, location, filters, specific values)?
 5. Should we use SQL data, documents, or both?
 
+IMPORTANT - SEMANTIC COLUMN MATCHING:
+When the user asks for certain concepts, recognize semantic equivalents in column names/comments:
+
+SENTIMENT / SATISFACTION equivalents:
+- "sentiment", "satisfaction", "rating", "score", "feedback", "CSAT", "NPS"
+- Columns with: "satisfied", "rating", "score", "feedback", "sentiment"
+
+LOCATION / CITY equivalents:
+- "city", "location", "place", "region", "area", "outlet", "branch", "site"
+- Columns with: "city", "location", "outlet", "branch", "region", "area"
+
+TIME / DATE equivalents:
+- "date", "time", "period", "month", "year", "quarter", "week"
+- Columns with: "date", "month", "year", "period", "time"
+
+EXAMPLES:
+- User asks "sentiment" → Column "satisfaction_score" ✅ MATCH
+- User asks "bangalore" → Column "Outlet" with values like "Bangalore Outlet" ✅ MATCH
+- User asks "november 2025" → Column "Month" ✅ MATCH
+
+BE FLEXIBLE: If column comments describe the concept, consider it a match even if name differs.
+
 IMPORTANT for missing_information:
-- If question is too vague (e.g., "how is sentiment" without specifying location, time, data source),
-  list SPECIFIC clarifying questions to ask the user
+- Only mark as missing if NO semantic equivalent exists
+- If equivalent exists but needs clarification (like which outlet for bangalore), mark as answerable with notes
 - Be actionable: "Which location/city?", "Which time period?", "Which data source/table?"
-- Don't just say "location missing" - say "Which location or city are you interested in?"
 
 Respond in JSON format:
 {{
@@ -257,13 +278,11 @@ Respond in JSON format:
     "relevant_tables": ["table1", "table2"],
     "relevant_columns": {{"table1": ["col1", "col2"]}},
     "missing_information": [
-        "Which location or city are you asking about?",
-        "What time period should I analyze?",
-        "Which data source (sales, PES, etc.)?"
+        "Which specific outlet in Bangalore?" (only if truly missing info)
     ],
     "needs_sql": true/false,
     "needs_documents": true/false,
-    "reasoning": "detailed explanation"
+    "reasoning": "detailed explanation with semantic matches found"
 }}"""
 
         try:
