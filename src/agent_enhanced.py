@@ -539,10 +539,24 @@ def create_supervisor_agent(agents: list):
     agent_names = [agent.name if hasattr(agent, 'name') else str(agent) for agent in agents if agent]
     options = ["FINISH", "HUMAN"] + agent_names + ["PARALLEL"]
 
+    # Build routing rules dynamically based on available agents
+    routing_rules = []
+    has_sql = any('SQL' in str(a) for a in agents if a)
+    has_docs = any('document' in str(a) for a in agents if a)
+
+    if has_sql:
+        routing_rules.append("- For data/SQL queries → SQL_Specialist")
+    if has_docs:
+        routing_rules.append("- For document/policy questions → document_search")
+    if has_sql and has_docs:
+        routing_rules.append("- For questions needing BOTH data AND documents → PARALLEL")
+    routing_rules.append("- If unsure or ambiguous → HUMAN")
+    routing_rules.append("- When you have complete answer → FINISH")
+
     system_prompt = f"""You are a supervisor agent coordinating a team of specialist agents.
 
 AVAILABLE SPECIALISTS:
-{chr(10).join(f'- {name}' for name in agent_names)}
+{chr(10).join(f'- {name}' for name in agent_names) if agent_names else "- None currently available"}
 
 YOUR CAPABILITIES:
 1. Route questions to appropriate specialists
@@ -552,16 +566,10 @@ YOUR CAPABILITIES:
 5. Decide when to FINISH and synthesize
 
 ROUTING RULES:
-- For data/SQL queries → SQL_Specialist
-- For document/policy questions → document_search
-- For questions needing BOTH data AND documents → PARALLEL
-- If unsure or ambiguous → HUMAN
-- When you have complete answer → FINISH
+{chr(10).join(routing_rules)}
 
-PARALLEL EXECUTION:
-- If you need both SQL and documents, respond: "PARALLEL:SQL_Specialist,document_search"
-- This will execute both agents concurrently (40-60% faster)
-
+{'PARALLEL EXECUTION:' if has_sql and has_docs else ''}
+{('- If you need both SQL and documents, respond: "PARALLEL:SQL_Specialist,document_search"' + chr(10) + '- This will execute both agents concurrently (40-60% faster)' + chr(10)) if has_sql and has_docs else ''}
 ITERATION AWARENESS:
 - You can see past attempts in the conversation history
 - If previous attempts failed, try a different approach

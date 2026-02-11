@@ -163,10 +163,19 @@ def create_supervisor_agent(agents: list):
     agent_names = [a.name if hasattr(a, 'name') else str(a) for a in agents if a is not None]
     options = ["FINISH"] + agent_names + ["HUMAN"]
 
+    # Build routing rules dynamically based on available agents
+    routing_rules = []
+    if any('SQL' in str(a) for a in agents if a is not None):
+        routing_rules.append("- For data/SQL queries → SQL_Specialist")
+    if any('document' in str(a) for a in agents if a is not None):
+        routing_rules.append("- For document/policy questions → document_search")
+    routing_rules.append("- If unsure or need clarification → HUMAN")
+    routing_rules.append("- When you have complete answer → FINISH")
+
     system_prompt = f"""You are a supervisor agent coordinating a team of specialists:
 
 AVAILABLE SPECIALISTS:
-{chr(10).join(f'- {name}' for name in agent_names)}
+{chr(10).join(f'- {name}' for name in agent_names) if agent_names else "- None currently available"}
 
 YOUR ROLE:
 1. Analyze user questions
@@ -176,10 +185,7 @@ YOUR ROLE:
 5. Ask HUMAN for clarification when needed
 
 ROUTING RULES:
-- For data/SQL queries → SQL_Specialist
-- For document/policy questions → document_search
-- If unsure or need clarification → HUMAN
-- When you have complete answer → FINISH
+{chr(10).join(routing_rules)}
 
 IMPORTANT:
 - You can call multiple specialists
@@ -382,15 +388,20 @@ def create_multi_agent_graph():
         else:
             return next_agent
 
+    # Build routing options dynamically based on available agents
+    routing_options = {
+        "synthesis": "synthesis",
+        "human": "human",
+    }
+    if genie_agent:
+        routing_options["SQL_Specialist"] = "SQL_Specialist"
+    if rag_agent:
+        routing_options["document_search"] = "document_search"
+
     workflow.add_conditional_edges(
         "supervisor",
         route_from_supervisor,
-        {
-            "synthesis": "synthesis",
-            "human": "human",
-            "SQL_Specialist": "SQL_Specialist",
-            "document_search": "document_search",
-        }
+        routing_options
     )
 
     # All specialists return to supervisor
