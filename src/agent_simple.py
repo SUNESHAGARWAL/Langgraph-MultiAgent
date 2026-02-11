@@ -199,31 +199,39 @@ INSTRUCTIONS:
    - The column COMMENT will tell you what the data means
 
 4. DETERMINE ANSWERABILITY
-   Question is ANSWERABLE if:
-   - You can find columns that semantically match the user's intent
-   - The table descriptions suggest relevant data exists
+   Question is ANSWERABLE WITHOUT CLARIFICATION if:
+   - Exactly ONE table clearly matches the user's intent
+   - All necessary filters are specified (date range, location, etc.)
+   - The query is complete and unambiguous
+
+   Question NEEDS CLARIFICATION if:
+   - MULTIPLE tables have matching data (which one to use?)
+   - Missing time period for time-series data
+   - Missing important filters (location, category, etc.)
+   - Query is too vague or ambiguous
 
    Question is NOT ANSWERABLE if:
    - No columns exist that could provide the requested information
-   - You need clarification on what the user means
-   - The user's terms are too vague or ambiguous
+   - The user's request is impossible with available data
 
 5. OUTPUT FORMAT
    Respond in this EXACT format:
 
-   **ANSWERABLE: YES** or **ANSWERABLE: NO**
+   **ANSWERABLE: YES** (if can answer without clarification)
+   **ANSWERABLE: NEEDS_CLARIFICATION** (if answerable but needs more details)
+   **ANSWERABLE: NO** (if not answerable with available data)
 
    **REASONING:**
-   [Explain your semantic matching logic]
+   [Explain your semantic matching logic and what's missing]
 
    **MATCHING TABLES AND COLUMNS:**
-   [If answerable, list the specific tables and columns you matched, with their descriptions]
+   [List all tables and columns that match]
 
-   **WHAT WE CAN ANSWER:**
-   [If answerable, briefly explain what the user will get]
+   **WHAT'S MISSING:**
+   [What details are not specified: table choice, date range, filters, etc.]
 
-   **CLARIFICATION NEEDED:**
-   [If not answerable, what specific information do you need from the user?]
+   **CLARIFICATION QUESTIONS:**
+   [Specific questions to ask the user. If they say "just proceed", we'll use defaults]
 
 AVAILABLE SCHEMAS:
 {schema_info}
@@ -241,10 +249,36 @@ Now analyze:"""
             analysis_content = response.content
             logger.info(f"Schema Analysis:\n{analysis_content}")
 
-            # Parse answerability
-            is_answerable = "ANSWERABLE: YES" in analysis_content.upper()
+            # Parse answerability status
+            content_upper = analysis_content.upper()
 
-            if is_answerable:
+            # Check for different states
+            if "ANSWERABLE: NEEDS_CLARIFICATION" in content_upper or "NEEDS CLARIFICATION" in content_upper:
+                logger.info("⚠️  Question needs clarification")
+
+                # Extract clarification questions
+                clarification = "I need more information to answer your question."
+                if "CLARIFICATION QUESTIONS:" in analysis_content:
+                    parts = analysis_content.split("CLARIFICATION QUESTIONS:")
+                    if len(parts) > 1:
+                        clarification = parts[1].strip()
+
+                # Format nice clarification message
+                clarification_msg = f"""I found data that matches your question, but I need some clarification:
+
+{clarification}
+
+💡 **Tip:** If you want me to just proceed with reasonable defaults, say "just proceed" or "use defaults"."""
+
+                return {
+                    "messages": [AIMessage(content=clarification_msg)],
+                    "schema_info": schema_info,
+                    "is_answerable": False,
+                    "next_agent": "human",
+                    "iterations": iterations + 1
+                }
+
+            elif "ANSWERABLE: YES" in content_upper:
                 logger.info("✓ Question is answerable with available data")
                 return {
                     "messages": [AIMessage(content=f"Schema Analysis:\n{analysis_content}")],
@@ -253,17 +287,19 @@ Now analyze:"""
                     "next_agent": "query_planner",
                     "iterations": iterations + 1
                 }
-            else:
-                logger.info("✗ Question is NOT answerable - needs clarification")
-                # Extract clarification question
-                clarification = "I need more information to answer your question."
-                if "CLARIFICATION NEEDED:" in analysis_content:
-                    parts = analysis_content.split("CLARIFICATION NEEDED:")
+
+            else:  # ANSWERABLE: NO
+                logger.info("✗ Question is NOT answerable - cannot be done with available data")
+
+                # Extract reason
+                reason = "This question cannot be answered with the available data."
+                if "REASONING:" in analysis_content:
+                    parts = analysis_content.split("REASONING:")
                     if len(parts) > 1:
-                        clarification = parts[1].strip()
+                        reason = parts[1].split("**")[0].strip()
 
                 return {
-                    "messages": [AIMessage(content=f"Schema Analysis:\n{analysis_content}\n\nI need clarification: {clarification}")],
+                    "messages": [AIMessage(content=f"I'm sorry, but {reason}")],
                     "schema_info": schema_info,
                     "is_answerable": False,
                     "next_agent": "human",
@@ -300,59 +336,76 @@ def create_query_planner_agent(llm: AzureChatOpenAI):
         # Get user question and schema analysis
         user_question = None
         schema_analysis = None
+        all_user_messages = []
 
-        for msg in reversed(messages):
-            if isinstance(msg, HumanMessage) and user_question is None:
-                user_question = msg.content
+        for msg in messages:
+            if isinstance(msg, HumanMessage):
+                all_user_messages.append(msg.content)
             if isinstance(msg, AIMessage) and "Schema Analysis" in msg.content and schema_analysis is None:
                 schema_analysis = msg.content
 
-        if not user_question or not schema_analysis:
-            logger.error("Missing user question or schema analysis")
+        # Get the original question and any clarifications
+        original_question = all_user_messages[0] if all_user_messages else None
+        latest_user_input = all_user_messages[-1] if all_user_messages else None
+
+        if not original_question:
+            logger.error("Missing user question")
             return {
                 "next_agent": "human",
                 "iterations": iterations + 1
             }
 
-        planning_prompt = f"""You are a query planning specialist.
+        # Check if user said "just proceed" or "use defaults"
+        use_defaults = False
+        if latest_user_input and any(phrase in latest_user_input.lower() for phrase in ["just proceed", "use default", "proceed", "go ahead", "continue anyway"]):
+            use_defaults = True
+            logger.info("User requested to proceed with defaults")
 
-Your task is to create CLEAN, FORMATTED queries for Databricks Genie.
+        # Build context from all user messages
+        user_context = f"Original question: {original_question}"
+        if len(all_user_messages) > 1 and not use_defaults:
+            user_context += f"\n\nAdditional details provided: {latest_user_input}"
+
+        planning_prompt = f"""You are a query planning specialist for Databricks Genie.
+
+Your task is to create NATURAL, CONVERSATIONAL queries that Genie can understand.
 
 IMPORTANT RULES:
-1. DO NOT send chat history to Genie
-2. DO NOT send conversational text
-3. Format queries as clear, specific questions
-4. Use this format: "From [table_name], show [columns] where [conditions]"
-5. Be specific about table names, column names, and filters
+1. Format queries as NATURAL QUESTIONS (not SQL!)
+2. Be specific about table names, filters, and what you want
+3. If user said "just proceed" or provided defaults, make reasonable assumptions
 
-EXAMPLE GOOD QUERIES:
-- "From catalog.schema.sales, show sentiment_score, city where city = 'bangalore'"
-- "From catalog.schema.orders, show revenue, product_name where order_date >= '2025-01-01'"
+GOOD NATURAL QUERIES:
+- "Show me sentiment data for bangalore from the pc_sales table"
+- "What is the average revenue for orders in October 2025?"
+- "From the PES table, show negative sentiment entries for bangalore in October 2025"
 
-EXAMPLE BAD QUERIES:
-- "Can you show me sentiment data?" (too vague)
-- "I will provide chat history..." (NO!)
-- Sending entire conversation context (NO!)
+BAD QUERIES:
+- "From catalog.schema.sales, show sentiment_score, city where city = 'bangalore'" (too SQL-like)
+- "Can you show me sentiment data?" (too vague - missing table/filters)
 
-SCHEMAS:
+{"USER WANTS DEFAULTS:" if use_defaults else ""}
+{f"The user said '{latest_user_input}' - make reasonable assumptions for missing details" if use_defaults else ""}
+
+AVAILABLE TABLES:
 {schema_info}
 
-USER QUESTION:
-{user_question}
+USER CONTEXT:
+{user_context}
 
 SCHEMA ANALYSIS:
 {schema_analysis}
 
-Now create clean, formatted queries. If multiple tables are involved, create separate queries for each.
+Now create natural, conversational queries for Genie. If multiple tables are involved, create separate queries.
 Output in this format:
 
 **QUERY 1:**
-[Clean formatted query]
+[Natural question for Genie]
 
 **QUERY 2:**
-[Clean formatted query if needed]
+[Natural question if needed]
 
-etc.
+If user requested defaults, choose the most relevant table and reasonable date ranges (e.g., last 3 months).
 """
 
         try:
@@ -606,6 +659,8 @@ def create_supervisor_node(llm: AzureChatOpenAI):
 
         # Check if we just received a clarification (user responded to human node)
         received_clarification = False
+        user_wants_defaults = False
+
         if len(messages) >= 2:
             last_msg = messages[-1]
             second_last = messages[-2]
@@ -613,8 +668,18 @@ def create_supervisor_node(llm: AzureChatOpenAI):
                 "clarification" in second_last.content.lower() and
                 isinstance(last_msg, HumanMessage)):
                 received_clarification = True
-                logger.info("✓ Received clarification from user - re-analyzing")
-                return {"next_agent": "schema"}
+
+                # Check if user said "just proceed" or similar
+                user_response = last_msg.content.lower()
+                if any(phrase in user_response for phrase in ["just proceed", "use default", "proceed", "go ahead", "continue anyway", "assume"]):
+                    user_wants_defaults = True
+                    logger.info("✓ User wants to proceed with defaults - going to query planner")
+                    # User wants defaults - go straight to query planner with current schema
+                    return {"next_agent": "query_planner", "is_answerable": True}
+                else:
+                    logger.info("✓ Received clarification details from user - re-analyzing")
+                    # User provided actual details - re-analyze with new info
+                    return {"next_agent": "schema"}
 
         # Check what's been done
         has_schema_analysis = any("Schema Analysis" in str(msg.content) for msg in messages if isinstance(msg, AIMessage))
