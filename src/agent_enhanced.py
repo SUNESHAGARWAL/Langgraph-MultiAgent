@@ -809,8 +809,30 @@ def create_multi_agent_graph():
     workflow.add_node("parallel", parallel)
 
     # Add specialist agent nodes
+    # Genie agent node (custom node, not ToolNode since GenieAgent returns RunnableLambda)
     if genie_agent:
-        workflow.add_node("SQL_Specialist", ToolNode([genie_agent]))
+        def genie_node(state: AgentState):
+            """Execute Genie SQL specialist"""
+            messages = state["messages"]
+            # Get the last user message
+            last_message = messages[-1].content if messages else ""
+
+            # Invoke genie agent
+            try:
+                result = genie_agent.invoke({"question": last_message})
+                response_content = result if isinstance(result, str) else str(result)
+                return {
+                    "messages": [AIMessage(content=f"SQL Specialist result:\n{response_content}")]
+                }
+            except Exception as e:
+                logger.error(f"Genie agent failed: {e}")
+                return {
+                    "messages": [AIMessage(content=f"SQL query failed: {str(e)}")]
+                }
+
+        workflow.add_node("SQL_Specialist", genie_node)
+
+    # RAG agent node (uses ToolNode since it's a proper retriever tool)
     if rag_agent:
         workflow.add_node("document_search", ToolNode([rag_agent]))
 
