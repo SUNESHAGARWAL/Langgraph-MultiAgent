@@ -178,10 +178,12 @@ def create_schema_analysis_agent(schema_reader: UnitySchemaReader, llm: AzureCha
 
 Your task is to understand the USER'S INTENT and match it to available data using SEMANTIC UNDERSTANDING.
 
-CRITICAL: DO NOT make assumptions about data availability! Only look at the schema metadata provided.
-- If user mentions October 2025 and you don't see date range info in schema → ASK for clarification
-- DO NOT say "data only available up to October 2023" unless schema explicitly says so
-- The schema shows column STRUCTURE, not data CONTENTS
+CRITICAL RULES:
+1. If user provides TABLE NAME + DATE + LOCATION → Mark as ANSWERABLE: YES
+2. DO NOT ask "can you confirm if data for X is available" - TRUST the user knows their data!
+3. Schema shows STRUCTURE not CONTENTS - you cannot know what data exists
+4. If user specifies details (table, date, location) → ASSUME data exists and proceed
+5. Only ask clarification if MISSING information (not provided yet)
 
 INSTRUCTIONS:
 
