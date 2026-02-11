@@ -242,15 +242,25 @@ Analyze this question carefully:
 1. Which tables contain relevant data?
 2. Which specific columns are needed?
 3. Can this question be fully answered with available data?
-4. What information is missing (time period, filters, specific values)?
+4. What information is missing (time period, location, filters, specific values)?
 5. Should we use SQL data, documents, or both?
+
+IMPORTANT for missing_information:
+- If question is too vague (e.g., "how is sentiment" without specifying location, time, data source),
+  list SPECIFIC clarifying questions to ask the user
+- Be actionable: "Which location/city?", "Which time period?", "Which data source/table?"
+- Don't just say "location missing" - say "Which location or city are you interested in?"
 
 Respond in JSON format:
 {{
     "is_answerable": true/false,
     "relevant_tables": ["table1", "table2"],
     "relevant_columns": {{"table1": ["col1", "col2"]}},
-    "missing_information": ["detail1", "detail2"] or [],
+    "missing_information": [
+        "Which location or city are you asking about?",
+        "What time period should I analyze?",
+        "Which data source (sales, PES, etc.)?"
+    ],
     "needs_sql": true/false,
     "needs_documents": true/false,
     "reasoning": "detailed explanation"
@@ -616,6 +626,10 @@ def create_supervisor():
         # Routing logic
         if "Schema Analysis" not in str(messages):
             next_agent = "schema"
+        # Check if question is answerable after schema analysis
+        elif "Schema Analysis" in str(messages) and not state.get("is_answerable"):
+            # Question not answerable - need clarification
+            next_agent = "human"
         elif "Query Plan" not in str(messages):
             next_agent = "query_planner"
         elif state.get("formatted_queries") and not state.get("genie_results"):
@@ -692,11 +706,17 @@ def create_human_node():
 
     def human_node(state: AgentState) -> Dict[str, Any]:
         missing_info = state.get("missing_information", [])
+        original_question = state.get("original_question", "your question")
 
         if missing_info:
-            clarification = "I need clarification:\n" + "\n".join(f"- {item}" for item in missing_info)
+            clarification = f"""Your question "{original_question}" needs more details.
+
+Please clarify:
+{chr(10).join(f"  {i+1}. {item}" for i, item in enumerate(missing_info))}
+
+Once you provide these details, I can query the data and give you an accurate answer."""
         else:
-            clarification = "I need more information. Please provide additional details."
+            clarification = "Your question needs more information. Please provide additional details such as:\n  1. Which data source or table?\n  2. What time period?\n  3. Any specific filters (location, category, etc.)?"
 
         return {
             "final_answer": clarification,
