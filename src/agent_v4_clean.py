@@ -237,52 +237,50 @@ AVAILABLE TABLES AND SCHEMAS:
 USER QUESTION:
 {question}
 
-Analyze this question carefully:
+Your task is to understand the USER'S INTENT and match it to available data using SEMANTIC UNDERSTANDING.
 
-1. Which tables contain relevant data?
-2. Which specific columns are needed?
-3. Can this question be fully answered with available data?
-4. What information is missing (time period, location, filters, specific values)?
-5. Should we use SQL data, documents, or both?
+INSTRUCTIONS:
 
-IMPORTANT - SEMANTIC COLUMN MATCHING:
-When the user asks for certain concepts, recognize semantic equivalents in column names/comments:
+1. READ THE COLUMN DESCRIPTIONS CAREFULLY
+   - Column names may not directly match user's words
+   - The COMMENT/DESCRIPTION tells you what the column actually contains
+   - Use your understanding to find semantic matches
 
-SENTIMENT / SATISFACTION equivalents:
-- "sentiment", "satisfaction", "rating", "score", "feedback", "CSAT", "NPS"
-- Columns with: "satisfied", "rating", "score", "feedback", "sentiment"
+2. UNDERSTAND USER INTENT
+   When user asks for:
+   - "sentiment" → They want emotional/satisfaction data (could be ratings, scores, feedback, satisfaction levels)
+   - "location" or city name → They want geographic data (could be in outlet, branch, region, city, area columns)
+   - "time" or date → They want temporal data (could be in date, month, year, period columns)
+   - "sales" → They want transaction/revenue data
+   - "performance" → They want metrics/KPIs
 
-LOCATION / CITY equivalents:
-- "city", "location", "place", "region", "area", "outlet", "branch", "site"
-- Columns with: "city", "location", "outlet", "branch", "region", "area"
+3. MATCH SEMANTICALLY, NOT LITERALLY
+   Examples:
+   - User: "sentiment for bangalore"
+     Column: "PCSL1 - satisfaction level" → YES, this IS sentiment data!
+     Column: "Outlet" → YES, this can contain bangalore!
 
-TIME / DATE equivalents:
-- "date", "time", "period", "month", "year", "quarter", "week"
-- Columns with: "date", "month", "year", "period", "time"
+   - User: "customer feedback by region"
+     Column: "rating_score" → YES, ratings ARE feedback!
+     Column: "branch_location" → YES, branch IS a region!
 
-EXAMPLES:
-- User asks "sentiment" → Column "satisfaction_score" ✅ MATCH
-- User asks "bangalore" → Column "Outlet" with values like "Bangalore Outlet" ✅ MATCH
-- User asks "november 2025" → Column "Month" ✅ MATCH
+4. BE INTELLIGENT ABOUT MISSING INFO
+   - If you found relevant columns but they need filtering (e.g., "which outlet in bangalore?"),
+     mark as ANSWERABLE but note what needs clarification
+   - Only mark as NOT ANSWERABLE if truly no relevant data exists
 
-BE FLEXIBLE: If column comments describe the concept, consider it a match even if name differs.
-
-IMPORTANT for missing_information:
-- Only mark as missing if NO semantic equivalent exists
-- If equivalent exists but needs clarification (like which outlet for bangalore), mark as answerable with notes
-- Be actionable: "Which location/city?", "Which time period?", "Which data source/table?"
+5. EXPLAIN YOUR SEMANTIC MATCHING
+   In "reasoning", explain which columns match which user concepts and WHY
 
 Respond in JSON format:
 {{
     "is_answerable": true/false,
     "relevant_tables": ["table1", "table2"],
-    "relevant_columns": {{"table1": ["col1", "col2"]}},
-    "missing_information": [
-        "Which specific outlet in Bangalore?" (only if truly missing info)
-    ],
+    "relevant_columns": {{"table1": ["actual_column_name", "another_column"]}},
+    "missing_information": ["only if truly missing - be specific"],
     "needs_sql": true/false,
     "needs_documents": true/false,
-    "reasoning": "detailed explanation with semantic matches found"
+    "reasoning": "Explain semantic matches: User asked for X, found it in column Y because Y's description indicates..."
 }}"""
 
         try:
