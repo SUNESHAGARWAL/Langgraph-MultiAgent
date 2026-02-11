@@ -623,9 +623,29 @@ def create_supervisor():
 
         messages = state["messages"]
 
+        # Check if we just received clarification after asking human
+        # (last 2 messages: clarification request from us, then user response)
+        received_clarification = False
+        if len(messages) >= 2:
+            last_msg = messages[-1]
+            second_last = messages[-2]
+            # If second-to-last was our clarification request and last is user's response
+            if (isinstance(second_last, AIMessage) and
+                "needs more details" in second_last.content and
+                isinstance(last_msg, HumanMessage)):
+                received_clarification = True
+
         # Routing logic
         if "Schema Analysis" not in str(messages):
+            # First time - analyze schema
             next_agent = "schema"
+        elif received_clarification:
+            # User provided clarification - re-analyze with full context
+            logger.info("Received clarification - re-analyzing with full context")
+            next_agent = "schema"
+            # Reset analysis flags so we can re-evaluate
+            state["is_answerable"] = None  # Will be set by schema agent
+            state["missing_information"] = []
         # Check if question is answerable after schema analysis
         elif "Schema Analysis" in str(messages) and not state.get("is_answerable"):
             # Question not answerable - need clarification
@@ -649,10 +669,18 @@ def create_supervisor():
 
         logger.info(f"Supervisor routing to: {next_agent} (iteration {iterations})")
 
-        return {
+        # Build return dict
+        result = {
             "next_agent": next_agent,
             "iterations": iterations + 1
         }
+
+        # If re-analyzing after clarification, reset flags
+        if received_clarification and next_agent == "schema":
+            result["is_answerable"] = True  # Reset to neutral (schema will set properly)
+            result["missing_information"] = []
+
+        return result
 
     return supervisor_node
 

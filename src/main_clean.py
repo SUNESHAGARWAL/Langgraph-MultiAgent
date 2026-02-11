@@ -74,26 +74,12 @@ def main():
             print("\n🤖 Processing...\n")
 
             try:
-                # Create input state
+                # Only pass new message - LangGraph checkpointer preserves state
                 input_state = {
                     "messages": [HumanMessage(content=question)],
-                    "original_question": "",
-                    "schema_info": {},
-                    "relevant_tables": [],
-                    "is_answerable": False,
-                    "missing_information": [],
-                    "formatted_queries": [],
-                    "execution_mode": "",
-                    "genie_results": [],
-                    "rag_results": [],
-                    "is_complete": False,
-                    "validation_feedback": "",
-                    "next_agent": "",
-                    "iterations": 0,
-                    "final_answer": ""
                 }
 
-                # Invoke with memory
+                # Invoke with memory (state is preserved by checkpointer)
                 result = agent.invoke(
                     input_state,
                     config={"configurable": {"thread_id": thread_id}}
