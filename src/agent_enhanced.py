@@ -576,9 +576,17 @@ ITERATION AWARENESS:
 - After 5 iterations, escalate to HUMAN
 
 IMPORTANT:
+- Review the FULL conversation history to understand context
+- If you previously asked for clarification and user provided it, incorporate that information
+- Combine original question with user's clarifications to determine the right specialist
 - Analyze validation feedback from previous attempts
 - Learn from NOT_RELEVANT or PARTIAL results
 - Always provide clear routing decisions
+
+CONVERSATION CONTEXT:
+- Look at all previous messages to understand the full request
+- User's follow-up messages often provide missing details from their original question
+- Combine all information before making routing decisions
 
 Respond with ONLY the next agent name or PARALLEL command:
 Valid responses: {', '.join(options)} or "PARALLEL:agent1,agent2"
@@ -741,8 +749,11 @@ def create_human_node():
         """Ask human for clarification."""
         messages = state["messages"]
 
-        # Extract what we need help with
-        last_message = messages[-1].content if messages else "Need clarification"
+        # Extract conversation context
+        conversation_text = "\n".join([
+            f"{msg.__class__.__name__}: {msg.content[:100]}..."
+            for msg in messages[-5:]  # Last 5 messages for context
+        ])
 
         logger.info("Requesting human clarification...")
 
@@ -750,13 +761,17 @@ def create_human_node():
         # - Slack/Teams webhook
         # - Queue system (RabbitMQ, SQS)
         # - API callback
-        # For now, we return a message indicating human input needed
+
+        clarification_msg = """I need more information to help you. Could you please clarify:
+- Which data source or table should I query?
+- What specific metrics or fields are you interested in?
+- What time period should I focus on?
+
+Please provide the missing details and I'll continue processing your request."""
 
         return {
-            "messages": [AIMessage(
-                content=f"🤔 Human clarification needed: {last_message}"
-            )],
-            "final_answer": f"Clarification needed: {last_message}\n\nPlease provide more details or rephrase your question.",
+            "messages": [AIMessage(content=clarification_msg)],
+            "final_answer": clarification_msg,
             "next_agent": "FINISH"
         }
 

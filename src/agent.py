@@ -178,7 +178,7 @@ AVAILABLE SPECIALISTS:
 {chr(10).join(f'- {name}' for name in agent_names) if agent_names else "- None currently available"}
 
 YOUR ROLE:
-1. Analyze user questions
+1. Analyze user questions and conversation history
 2. Route to appropriate specialist(s)
 3. Replan if results are insufficient
 4. Synthesize final answers
@@ -188,11 +188,19 @@ ROUTING RULES:
 {chr(10).join(routing_rules)}
 
 IMPORTANT:
+- Review the FULL conversation history to understand context
+- If you previously asked for clarification and user provided it, incorporate that information
+- Combine original question with user's clarifications to determine the right specialist
 - You can call multiple specialists
 - You can replan and retry
 - Always synthesize results clearly
 - Cite sources
 - If stuck after 3 iterations → ask HUMAN
+
+CONVERSATION CONTEXT:
+- Look at all previous messages to understand the full request
+- User's follow-up messages often provide missing details from their original question
+- Combine all information before making routing decisions
 
 Respond with ONLY the next agent name: {', '.join(options)}"""
 
@@ -285,20 +293,38 @@ When synthesizing:
 # ============================================================================
 
 def create_human_node():
-    """Create node that asks human for input"""
+    """Create node that asks human for clarification"""
 
     def human_node(state: AgentState):
         """Ask human for clarification"""
         messages = state["messages"]
 
-        # Extract what we're confused about
-        last_message = messages[-1].content if messages else "I need clarification"
+        # Analyze conversation to determine what information is missing
+        conversation_text = "\n".join([
+            f"{msg.__class__.__name__}: {msg.content}"
+            for msg in messages[-5:]  # Last 5 messages for context
+        ])
 
-        # In CLI, this will pause and wait for input
-        # In production, you'd handle this differently (webhook, queue, etc.)
+        # Generate specific clarifying question
+        clarification_prompt = f"""Based on this conversation, what specific information is missing?
+
+{conversation_text}
+
+Provide a brief, specific question to ask the user (one sentence)."""
+
+        # For now, ask a generic clarifying question
+        # In production, you could use an LLM to generate a smart question
+        clarification_msg = """I need more information to help you. Could you please clarify:
+- Which data source or table should I query?
+- What specific metrics or fields are you interested in?
+- What time period should I focus on?
+
+Please provide the missing details and I'll continue processing your request."""
+
         return {
-            "messages": [AIMessage(content=f"Asking human for clarification: {last_message}")],
-            "next_agent": "FINISH"  # For now, finish after asking
+            "messages": [AIMessage(content=clarification_msg)],
+            "next_agent": "FINISH",  # End conversation, wait for user clarification
+            "final_answer": clarification_msg
         }
 
     return human_node
@@ -410,7 +436,7 @@ def create_multi_agent_graph():
     if rag_agent:
         workflow.add_edge("document_search", "supervisor")
 
-    # Synthesis and human end
+    # Terminal nodes (end conversation)
     workflow.add_edge("synthesis", END)
     workflow.add_edge("human", END)
 

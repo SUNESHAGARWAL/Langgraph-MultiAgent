@@ -64,17 +64,16 @@ def main():
             print("\n🤖 Processing...\n")
 
             try:
-                # Initial state
-                initial_state = {
+                # Add new message to existing conversation
+                # LangGraph will load previous state from checkpointer automatically
+                input_state = {
                     "messages": [HumanMessage(content=question)],
-                    "next_agent": "",
-                    "iterations": 0,
-                    "final_answer": ""
                 }
 
                 # Invoke with conversation memory
+                # Note: iterations and other state preserved by checkpointer
                 result = agent.invoke(
-                    initial_state,
+                    input_state,
                     config={"configurable": {"thread_id": thread_id}}
                 )
 
