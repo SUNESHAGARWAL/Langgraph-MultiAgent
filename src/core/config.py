@@ -198,6 +198,7 @@ class MLflowConfig(BaseSettings):
 
     tracking_uri: str = Field(default="databricks", alias="MLFLOW_TRACKING_URI")
     experiment_name: str = Field(..., alias="MLFLOW_EXPERIMENT_NAME")
+    tracking_enabled: bool = Field(default=True, alias="MLFLOW_TRACKING_ENABLED")
     enable_system_metrics: bool = Field(default=True, alias="MLFLOW_ENABLE_SYSTEM_METRICS")
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")

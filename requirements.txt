@@ -25,6 +25,9 @@ python-dotenv>=1.0.0
 pydantic>=2.9.0
 pydantic-settings>=2.6.0
 
+# Azure Storage
+azure-storage-blob>=12.19.0
+
 # Database for Persistent Memory
 psycopg2-binary>=2.9.9  # PostgreSQL adapter
 langgraph-checkpoint-postgres>=1.0.0  # LangGraph PostgreSQL checkpointer
