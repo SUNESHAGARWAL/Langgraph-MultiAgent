@@ -85,12 +85,26 @@ def main():
                 # LangGraph checkpointer preserves conversation state
                 input_state = {
                     "messages": [HumanMessage(content=question)],
+
+                    # Routing control
                     "next_agent": "",
                     "iterations": 0,
-                    "final_answer": "",
+
+                    # Workflow tracking (explicit state fields)
+                    "schema_analyzed": False,
+                    "query_planned": False,
+                    "genie_executed": False,
+
+                    # Core data
+                    "original_question": "",
                     "schema_info": "",
+                    "formatted_query": "",
+                    "final_answer": "",
+
+                    # Analysis results
                     "is_answerable": False,
-                    "formatted_query": ""
+                    "needs_clarification": False,
+                    "clarification_provided": False,
                 }
 
                 # Invoke with memory

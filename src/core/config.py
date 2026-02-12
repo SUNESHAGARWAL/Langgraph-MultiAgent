@@ -56,141 +56,13 @@ class DatabricksConfig(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
-class AzureStorageConfig(BaseSettings):
-    """
-    Azure Blob Storage Configuration
-
-    IMPORTANT: Supports two patterns:
-    1. Separate containers: container_cache=agent-cache, container_rag=agent-rag-docs
-    2. Single container with prefixes: container_cache=reservoir/adm/CXEngine/agent-cache
-
-    Pattern 2 will automatically extract container name and blob prefix.
-    """
-
-    connection_string: str = Field(..., alias="AZURE_STORAGE_CONNECTION_STRING")
-
-    # These can be either:
-    # - Just container name: "agent-cache"
-    # - Container + path: "reservoir/adm/CXEngine/agent-cache"
-    container_cache: str = Field(default="agent-cache", alias="AZURE_STORAGE_CONTAINER_CACHE")
-    container_rag: str = Field(default="agent-rag-docs", alias="AZURE_STORAGE_CONTAINER_RAG")
-    container_eda: str = Field(default="agent-eda-results", alias="AZURE_STORAGE_CONTAINER_EDA")
-
-    # Parsed values (set automatically)
-    _cache_container: Optional[str] = None
-    _cache_prefix: Optional[str] = None
-    _rag_container: Optional[str] = None
-    _rag_prefix: Optional[str] = None
-    _eda_container: Optional[str] = None
-    _eda_prefix: Optional[str] = None
-
-    def __init__(self, **data):
-        super().__init__(**data)
-        # Parse container/prefix patterns
-        self._cache_container, self._cache_prefix = self._parse_container_path(self.container_cache)
-        self._rag_container, self._rag_prefix = self._parse_container_path(self.container_rag)
-        self._eda_container, self._eda_prefix = self._parse_container_path(self.container_eda)
-
-    @staticmethod
-    def _parse_container_path(value: str) -> tuple[str, str]:
-        """
-        Parse container path into container name and blob prefix.
-
-        Examples:
-        - "agent-cache" → ("agent-cache", "")
-        - "reservoir/adm/CXEngine/agent-cache" → ("reservoir", "adm/CXEngine/agent-cache")
-        """
-        if "/" in value:
-            parts = value.split("/", 1)
-            return parts[0], parts[1]
-        return value, ""
-
-    def get_cache_config(self) -> tuple[str, str]:
-        """Returns (container_name, blob_prefix) for cache"""
-        return self._cache_container, self._cache_prefix
-
-    def get_rag_config(self) -> tuple[str, str]:
-        """Returns (container_name, blob_prefix) for RAG"""
-        return self._rag_container, self._rag_prefix
-
-    def get_eda_config(self) -> tuple[str, str]:
-        """Returns (container_name, blob_prefix) for EDA"""
-        return self._eda_container, self._eda_prefix
-
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
-
-
-class RedisConfig(BaseSettings):
-    """Redis Configuration for Caching"""
-
-    enabled: bool = Field(default=False, alias="REDIS_ENABLED")
-    host: str = Field(default="localhost", alias="REDIS_HOST")
-    port: int = Field(default=6379, alias="REDIS_PORT")
-    password: Optional[str] = Field(default=None, alias="REDIS_PASSWORD")
-    db: int = Field(default=0, alias="REDIS_DB")
-
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
-
-
-class CacheConfig(BaseSettings):
-    """Caching Configuration"""
-
-    ttl_seconds: int = Field(default=3600, alias="CACHE_TTL_SECONDS")
-    ttl_hours: int = Field(default=24, alias="CACHE_TTL_HOURS")
-    similarity_threshold: float = Field(default=0.90, alias="CACHE_SIMILARITY_THRESHOLD")
-    max_entries: int = Field(default=10000, alias="CACHE_MAX_ENTRIES")
-    cache_dir: str = Field(default="./data/cache", alias="CACHE_DIR")
-
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
-
-
-class DatabaseConfig(BaseSettings):
-    """Database Configuration for Persistent Memory"""
-
-    postgres_url: Optional[str] = Field(default=None, alias="POSTGRES_URL")
-    use_persistent_memory: bool = Field(default=False, alias="USE_PERSISTENT_MEMORY")
-
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
-
-
-class VectorStoreConfig(BaseSettings):
-    """Vector Store Configuration"""
-
-    type: str = Field(default="faiss", alias="VECTOR_STORE_TYPE")
-    path: str = Field(default="./data/vector_stores", alias="VECTOR_STORE_PATH")
-    dimension: int = Field(default=1536, alias="VECTOR_DIMENSION")
-    similarity_top_k: int = Field(default=5, alias="SIMILARITY_TOP_K")
-
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
-
-
-class RAGConfig(BaseSettings):
-    """
-    RAG Configuration
-
-    IMPORTANT: RAG now monitors Azure Blob Storage (not local filesystem).
-    watch_path is deprecated - files are monitored in AZURE_STORAGE_CONTAINER_RAG.
-    """
-
-    watch_path: Optional[str] = Field(default=None, alias="RAG_WATCH_PATH")  # Deprecated
-    auto_process: bool = Field(default=True, alias="RAG_AUTO_PROCESS")
-    supported_extensions: str = Field(
-        default=".pdf,.txt,.csv,.docx,.pptx,.xlsx",
-        alias="RAG_SUPPORTED_EXTENSIONS"
-    )
-    poll_interval: int = Field(default=10, alias="RAG_POLL_INTERVAL")  # seconds
-
-    @field_validator("supported_extensions", mode="after")
-    @classmethod
-    def parse_extensions(cls, v):
-        """Parse comma-separated extensions into a list"""
-        if isinstance(v, str):
-            return [ext.strip() for ext in v.split(",") if ext.strip()]
-        elif isinstance(v, list):
-            return v
-        return [".pdf", ".txt", ".csv", ".docx", ".pptx", ".xlsx"]
-
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+# Unused config classes removed in v5.0 simplification:
+# - AzureStorageConfig (not used in simplified architecture)
+# - RedisConfig (not used in simplified architecture)
+# - CacheConfig (not used in simplified architecture)
+# - DatabaseConfig (not used in simplified architecture)
+# - VectorStoreConfig (not used in simplified architecture)
+# - RAGConfig (not used in simplified architecture)
 
 
 class MLflowConfig(BaseSettings):
@@ -273,14 +145,9 @@ class Config:
         if self._initialized:
             return
 
+        # V5.0 Simplified - Only load configs that are actually used
         self.azure_openai = AzureOpenAIConfig()
         self.databricks = DatabricksConfig()
-        self.azure_storage = AzureStorageConfig()
-        self.redis = RedisConfig()
-        self.cache = CacheConfig()
-        self.database = DatabaseConfig()
-        self.vector_store = VectorStoreConfig()
-        self.rag = RAGConfig()
         self.mlflow = MLflowConfig()
         self.agent = AgentConfig()
         self.logging = LoggingConfig()
@@ -292,9 +159,7 @@ class Config:
     def _ensure_directories(self):
         """Create necessary directories if they don't exist"""
         directories = [
-            self.vector_store.path,
             self.app.session_storage_path,
-            "./data/cache",
             "./data/logs",
         ]
         for directory in directories:

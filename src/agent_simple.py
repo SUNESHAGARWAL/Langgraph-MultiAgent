@@ -36,14 +36,29 @@ logger = get_logger(__name__)
 # ============================================================================
 
 class AgentState(TypedDict):
-    """State passed between agents"""
+    """State passed between agents with explicit workflow tracking"""
+    # Message history (LangGraph operator.add reducer)
     messages: Annotated[list[BaseMessage], operator.add]
-    next_agent: str
-    iterations: int
-    final_answer: str
-    schema_info: str
-    is_answerable: bool
-    formatted_query: str
+
+    # Workflow stage tracking (explicit boolean flags)
+    schema_analyzed: bool          # Schema analysis completed?
+    query_planned: bool            # Query planning completed?
+    genie_executed: bool           # Genie execution completed?
+
+    # Core data fields
+    original_question: str         # Store original user question
+    schema_info: str              # Unity Catalog schema info
+    formatted_query: str          # Query for Genie
+    final_answer: str             # Synthesized answer
+
+    # Routing control
+    next_agent: str               # Next agent to route to
+    iterations: int               # Iteration counter
+
+    # Analysis results
+    is_answerable: bool           # Can question be answered?
+    needs_clarification: bool     # Needs user clarification?
+    clarification_provided: bool  # User provided clarification?
 
 
 # ============================================================================
@@ -151,18 +166,25 @@ def create_schema_analysis_agent(schema_reader: UnitySchemaReader, llm: AzureCha
         iterations = state.get("iterations", 0)
         messages = state["messages"]
 
-        # Get user question (last human message)
-        user_question = None
-        for msg in reversed(messages):
-            if isinstance(msg, HumanMessage):
-                user_question = msg.content
-                break
+        # Get or store original question
+        original_question = state.get("original_question", "")
+        if not original_question:
+            # Extract from latest human message
+            for msg in reversed(messages):
+                if isinstance(msg, HumanMessage):
+                    original_question = msg.content
+                    break
+
+        user_question = original_question
 
         if not user_question:
             logger.error("No user question found")
             return {
+                **state,  # Preserve all existing fields
                 "next_agent": "human",
                 "is_answerable": False,
+                "needs_clarification": True,
+                "schema_analyzed": False,
                 "iterations": iterations + 1
             }
 
@@ -280,9 +302,13 @@ I found data that matches your question, but I need some clarification:
 💡 **Tip:** If you want me to just proceed with reasonable defaults, say "just proceed" or "use defaults"."""
 
                 return {
+                    **state,  # Preserve all existing fields
                     "messages": [AIMessage(content=clarification_msg)],
+                    "original_question": original_question,
                     "schema_info": schema_info,
+                    "schema_analyzed": True,
                     "is_answerable": False,
+                    "needs_clarification": True,
                     "next_agent": "human",
                     "iterations": iterations + 1
                 }
@@ -290,9 +316,13 @@ I found data that matches your question, but I need some clarification:
             elif "ANSWERABLE: YES" in content_upper:
                 logger.info("✓ Question is answerable with available data")
                 return {
+                    **state,  # Preserve all existing fields
                     "messages": [AIMessage(content=f"Schema Analysis:\n{analysis_content}")],
+                    "original_question": original_question,
                     "schema_info": schema_info,
+                    "schema_analyzed": True,
                     "is_answerable": True,
+                    "needs_clarification": False,
                     "next_agent": "query_planner",
                     "iterations": iterations + 1
                 }
@@ -308,9 +338,13 @@ I found data that matches your question, but I need some clarification:
                         reason = parts[1].split("**")[0].strip()
 
                 return {
+                    **state,  # Preserve all existing fields
                     "messages": [AIMessage(content=f"I'm sorry, but {reason}")],
+                    "original_question": original_question,
                     "schema_info": schema_info,
+                    "schema_analyzed": True,
                     "is_answerable": False,
+                    "needs_clarification": False,
                     "next_agent": "human",
                     "iterations": iterations + 1
                 }
@@ -318,9 +352,12 @@ I found data that matches your question, but I need some clarification:
         except Exception as e:
             logger.error(f"Schema analysis failed: {e}", exc_info=True)
             return {
+                **state,  # Preserve all existing fields
                 "messages": [AIMessage(content=f"Schema analysis error: {str(e)}")],
+                "schema_analyzed": False,
                 "next_agent": "human",
                 "is_answerable": False,
+                "needs_clarification": True,
                 "iterations": iterations + 1
             }
 
@@ -360,6 +397,7 @@ def create_query_planner_agent(llm: AzureChatOpenAI):
         if not original_question:
             logger.error("Missing user question")
             return {
+                **state,  # Preserve all existing fields
                 "next_agent": "human",
                 "iterations": iterations + 1
             }
@@ -444,8 +482,10 @@ If user requested defaults, choose the most relevant table and reasonable date r
             formatted_query_text = "\n\n".join([f"Query {i+1}: {q}" for i, q in enumerate(formatted_queries)])
 
             return {
+                **state,  # Preserve all existing fields
                 "messages": [AIMessage(content=f"Query Plan:\n{query_plan}")],
                 "formatted_query": formatted_query_text,
+                "query_planned": True,
                 "next_agent": "genie",
                 "iterations": iterations + 1
             }
@@ -453,7 +493,9 @@ If user requested defaults, choose the most relevant table and reasonable date r
         except Exception as e:
             logger.error(f"Query planning failed: {e}", exc_info=True)
             return {
+                **state,  # Preserve all existing fields
                 "messages": [AIMessage(content=f"Query planning error: {str(e)}")],
+                "query_planned": False,
                 "next_agent": "synthesis",
                 "iterations": iterations + 1
             }
@@ -487,7 +529,9 @@ def create_genie_executor_node(workspace_client: WorkspaceClient):
         if not formatted_query:
             logger.error("No formatted query found")
             return {
+                **state,  # Preserve all existing fields
                 "messages": [AIMessage(content="Error: No query to execute")],
+                "genie_executed": False,
                 "next_agent": "synthesis",
                 "iterations": iterations + 1
             }
@@ -530,7 +574,9 @@ def create_genie_executor_node(workspace_client: WorkspaceClient):
         combined_results = "\n\n".join(results)
 
         return {
+            **state,  # Preserve all existing fields
             "messages": [AIMessage(content=f"Genie Results:\n\n{combined_results}")],
+            "genie_executed": True,
             "next_agent": "synthesis",
             "iterations": iterations + 1
         }
@@ -584,6 +630,7 @@ Now synthesize the information below into a final answer:"""
             logger.info("✓ Synthesis complete")
 
             return {
+                **state,  # Preserve all existing fields
                 "messages": [AIMessage(content=final_answer)],
                 "final_answer": final_answer,
                 "next_agent": "FINISH",
@@ -593,6 +640,7 @@ Now synthesize the information below into a final answer:"""
         except Exception as e:
             logger.error(f"Synthesis failed: {e}", exc_info=True)
             return {
+                **state,  # Preserve all existing fields
                 "messages": [AIMessage(content=f"I encountered an error while synthesizing results: {str(e)}")],
                 "final_answer": f"Error: {str(e)}",
                 "next_agent": "FINISH",
@@ -605,7 +653,7 @@ Now synthesize the information below into a final answer:"""
 def create_human_node():
     """
     Agent that handles human clarification requests.
-    In production, replace with actual human-in-loop system.
+    Loops back to supervisor after displaying clarification question.
     """
 
     def human_node(state: AgentState) -> Dict[str, Any]:
@@ -621,13 +669,15 @@ def create_human_node():
                 clarification_question = msg.content
                 break
 
-        # In CLI mode, this will return and wait for user input
-        # The user's response will come as a new message in the next invoke call
+        # In CLI mode, this will display the clarification and wait for user input
+        # The graph will pause here, and when user responds, it loops back to supervisor
 
         return {
+            **state,  # Preserve all existing fields
             "messages": [AIMessage(content=clarification_question)],
             "final_answer": clarification_question,
-            "next_agent": "FINISH",  # End and wait for user response
+            "clarification_provided": False,  # Will be set to True when user responds
+            "next_agent": "supervisor",  # Loop back to supervisor after user responds
             "iterations": iterations + 1
         }
 
@@ -656,82 +706,69 @@ def create_supervisor_node(llm: AzureChatOpenAI):
 
         iterations = state.get("iterations", 0)
         messages = state["messages"]
-        is_answerable = state.get("is_answerable", None)
-        formatted_query = state.get("formatted_query", "")
+
+        # Get state tracking fields
+        schema_analyzed = state.get("schema_analyzed", False)
+        query_planned = state.get("query_planned", False)
+        genie_executed = state.get("genie_executed", False)
+        is_answerable = state.get("is_answerable", False)
+        needs_clarification = state.get("needs_clarification", False)
 
         logger.info(f"Iteration {iterations}")
+        logger.info(f"State: schema_analyzed={schema_analyzed}, query_planned={query_planned}, "
+                   f"genie_executed={genie_executed}, is_answerable={is_answerable}, "
+                   f"needs_clarification={needs_clarification}")
 
-        # Safety: Force synthesis after 5 iterations
-        if iterations >= 5:
+        # Safety: Force synthesis after 10 iterations
+        if iterations >= 10:
             logger.warning("Max iterations reached - forcing synthesis")
-            return {"next_agent": "synthesis"}
+            return {**state, "next_agent": "synthesis"}
 
-        # Check if we just received a clarification (user responded to human node)
-        received_clarification = False
-        user_wants_defaults = False
-
+        # Check if user just provided clarification
         if len(messages) >= 2:
             last_msg = messages[-1]
             second_last = messages[-2]
             if (isinstance(second_last, AIMessage) and
                 "clarification" in second_last.content.lower() and
                 isinstance(last_msg, HumanMessage)):
-                received_clarification = True
 
-                # Check if user said "just proceed" or similar
+                # User responded to clarification
                 user_response = last_msg.content.lower()
                 if any(phrase in user_response for phrase in ["just proceed", "use default", "proceed", "go ahead", "continue anyway", "assume"]):
-                    user_wants_defaults = True
-                    logger.info("✓ User wants to proceed with defaults - going to query planner")
-                    # User wants defaults - go straight to query planner with current schema
-                    return {"next_agent": "query_planner", "is_answerable": True}
+                    logger.info("✓ User wants defaults - going to query planner")
+                    return {**state, "next_agent": "query_planner", "is_answerable": True, "needs_clarification": False}
                 else:
-                    logger.info("✓ Received clarification details from user - re-analyzing")
-                    # User provided actual details - re-analyze with new info
-                    return {"next_agent": "schema"}
+                    logger.info("✓ User provided clarification - re-analyzing schema")
+                    return {**state, "next_agent": "schema", "schema_analyzed": False, "needs_clarification": False, "clarification_provided": True}
 
-        # Check what's been done
-        has_schema_analysis = any(
-            "Schema Analysis" in str(msg.content) or "[Schema Analysis Complete" in str(msg.content)
-            for msg in messages if isinstance(msg, AIMessage)
-        )
-        has_query_plan = any("Query Plan" in str(msg.content) for msg in messages if isinstance(msg, AIMessage))
-        has_genie_results = any("Genie Results" in str(msg.content) for msg in messages if isinstance(msg, AIMessage))
+        # Routing logic based on explicit state fields
+        if not schema_analyzed:
+            logger.info("→ Routing to: schema (not analyzed yet)")
+            return {**state, "next_agent": "schema"}
 
-        # Check if waiting for clarification
-        needs_clarification = any(
-            "Needs Clarification" in str(msg.content) or "need some clarification" in str(msg.content)
-            for msg in messages if isinstance(msg, AIMessage)
-        )
-
-        # Routing logic
-        if not has_schema_analysis:
-            logger.info("→ Routing to: schema (no analysis yet)")
-            return {"next_agent": "schema"}
-
-        if needs_clarification and is_answerable == False:
+        if needs_clarification:
             logger.info("→ Routing to: human (needs clarification)")
-            return {"next_agent": "human"}
+            return {**state, "next_agent": "human"}
 
-        if is_answerable == False:
-            logger.info("→ Routing to: human (not answerable)")
-            return {"next_agent": "human"}
+        if not is_answerable:
+            logger.info("→ Routing to: synthesis (not answerable)")
+            return {**state, "next_agent": "synthesis"}
 
-        if is_answerable == True and not has_query_plan:
+        if is_answerable and not query_planned:
             logger.info("→ Routing to: query_planner (answerable, need plan)")
-            return {"next_agent": "query_planner"}
+            return {**state, "next_agent": "query_planner"}
 
-        if has_query_plan and not has_genie_results:
+        if query_planned and not genie_executed:
             logger.info("→ Routing to: genie (have plan, need execution)")
-            return {"next_agent": "genie"}
+            return {**state, "next_agent": "genie"}
 
-        if has_genie_results:
+        if genie_executed:
             logger.info("→ Routing to: synthesis (have results)")
-            return {"next_agent": "synthesis"}
+            return {**state, "next_agent": "synthesis"}
 
         # Default: go to synthesis
         logger.info("→ Routing to: synthesis (default)")
-        return {"next_agent": "synthesis"}
+        return {**state, "next_agent": "synthesis"}
 
     return supervisor_node
 
@@ -805,16 +842,19 @@ def create_multi_agent_graph():
         }
     )
 
-    # All agents loop back to supervisor (except synthesis and human which end)
+    # All agents loop back to supervisor (except synthesis which ends)
     workflow.add_edge("schema", "supervisor")
     workflow.add_edge("query_planner", "supervisor")
     workflow.add_edge("genie", "supervisor")
     workflow.add_edge("synthesis", END)
-    workflow.add_edge("human", END)
+    workflow.add_edge("human", "supervisor")  # Human loops back to supervisor!
 
-    # Compile with memory
+    # Compile with memory and recursion limit
     memory = MemorySaver()
-    graph = workflow.compile(checkpointer=memory)
+    graph = workflow.compile(
+        checkpointer=memory,
+        recursion_limit=20  # Prevent infinite loops
+    )
 
     logger.info("✓ Simplified multi-agent system initialized")
 
