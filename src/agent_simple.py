@@ -862,11 +862,15 @@ def create_synthesis_agent(llm: AzureChatOpenAI):
                 user_question = msg.content
                 break
 
-        synthesis_prompt = """You are a synthesis specialist.
+        # FIXED: Only pass LAST 5 messages to avoid context overflow
+        # (Original question + schema analysis + query + genie results + synthesis request)
+        relevant_messages = messages[-5:] if len(messages) > 5 else messages
+
+        synthesis_prompt = f"""You are a synthesis specialist.
 
 Your task:
-1. Review all the information gathered (schema analysis, query results)
-2. Create a clear, comprehensive answer to the user's question
+1. Review the information gathered (schema analysis, query results)
+2. Create a clear, comprehensive answer to the user's question: "{user_question}"
 3. Format results nicely (use tables if appropriate)
 4. Cite which tables/data sources were used
 5. Be concise but complete
@@ -878,7 +882,7 @@ Now synthesize the information below into a final answer:"""
         try:
             response = llm.invoke([
                 SystemMessage(content=synthesis_prompt),
-                *messages,
+                *relevant_messages,
                 HumanMessage(content="Please synthesize the above information into a final answer for the user.")
             ])
 
@@ -925,15 +929,15 @@ def create_human_node():
                 clarification_question = msg.content
                 break
 
-        # In CLI mode, this will display the clarification and wait for user input
-        # The graph will pause here, and when user responds, it loops back to supervisor
+        # FIXED: End the graph here so CLI can prompt user for input
+        # User's response will start a new invocation with clarification_provided=True
 
         return {
             **state,  # Preserve all existing fields
             "messages": [AIMessage(content=clarification_question)],
             "final_answer": clarification_question,
-            "clarification_provided": False,  # Will be set to True when user responds
-            "next_agent": "supervisor",  # Loop back to supervisor after user responds
+            "needs_clarification": True,  # Signal that we're waiting for user
+            "next_agent": "FINISH",  # End graph, wait for user input
             "iterations": iterations + 1
         }
 
@@ -1302,12 +1306,12 @@ def create_multi_agent_graph():
         routing_dict
     )
 
-    # All agents loop back to supervisor (except synthesis which ends)
+    # All agents loop back to supervisor (except synthesis and human which end)
     workflow.add_edge("schema", "supervisor")
     workflow.add_edge("query_planner", "supervisor")
     workflow.add_edge("genie", "supervisor")
     workflow.add_edge("synthesis", END)
-    workflow.add_edge("human", "supervisor")  # Human loops back to supervisor!
+    workflow.add_edge("human", END)  # FIXED: Human ends graph, waits for user input
 
     # RAG loops back to supervisor (if enabled)
     if rag_node:
