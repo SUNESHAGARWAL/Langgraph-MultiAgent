@@ -229,80 +229,162 @@ IMPORTANT: The user has now provided additional details. Re-analyze with this NE
             schema_info = schema_reader.read_all_configured_schemas()
             logger.info(f"✓ Loaded schemas for {len(config.databricks.unity_tables)} tables")
 
-        # Analyze with LLM using semantic understanding
-        analysis_prompt = f"""You are a data analyst expert analyzing Unity Catalog schemas.
+        # Get RAG context if available (business definitions, metric calculations)
+        rag_context = state.get("rag_context", "")
 
-Your task is to understand the USER'S INTENT and match it to available data using SEMANTIC UNDERSTANDING.
+        # Analyze with LLM using semantic understanding + RAG context + business logic
+        analysis_prompt = f"""You are an expert data analyst with deep business intelligence capabilities.
 
-CRITICAL RULES:
-1. If user provides TABLE NAME + DATE + LOCATION → Mark as ANSWERABLE: YES
-2. DO NOT ask "can you confirm if data for X is available" - TRUST the user knows their data!
-3. Schema shows STRUCTURE not CONTENTS - you cannot know what data exists
-4. If user specifies details (table, date, location) → ASSUME data exists and proceed
-5. Only ask clarification if MISSING information (not provided yet)
+Your task: Understand USER INTENT, intelligently select RELEVANT COLUMNS, and apply BUSINESS LOGIC.
 
-INSTRUCTIONS:
+═══════════════════════════════════════════════════════════════════════════════
+🧠 INTELLIGENT REASONING RULES
+═══════════════════════════════════════════════════════════════════════════════
 
-1. READ THE COLUMN DESCRIPTIONS CAREFULLY
-   - Column names may not directly match user's words
-   - The COMMENT/DESCRIPTION tells you what the column actually contains
-   - Use your understanding to find semantic matches
+1. SEMANTIC COLUMN MATCHING (Be Smart, Not Literal!)
 
-2. UNDERSTAND USER INTENT
-   When user asks for:
-   - "sentiment" → They want emotional/satisfaction data (look for sentiment_score, satisfaction, nps, etc.)
-   - "location" or city name → They want geographic data (look for city, location, region, geo columns)
-   - "time" or date → They want temporal data (look for date, timestamp, period columns)
-   - "revenue" or "sales" → They want financial data (look for amount, revenue, sales columns)
+   User says "sentiment" → Think: What columns capture emotional/satisfaction data?
+   ✓ sentiment_score, customer_satisfaction, nps, csat, feedback_rating, mood_score
+   ✗ Don't require exact "sentiment" column name
 
-3. BE FLEXIBLE WITH COLUMN NAMES
-   Example: If user asks "sentiment for bangalore"
-   - Look for ANY column that contains sentiment data (sentiment_score, customer_satisfaction, nps_score, etc.)
-   - Look for ANY column that contains location (city, location, geography, region, etc.)
-   - The column COMMENT will tell you what the data means
+   User says "conversion rate" → Think: What formula? What columns needed?
+   ✓ conversion_rate (if exists) OR calculate: conversions / total_visitors
+   ✓ Identify: conversions, purchases, clicks, visits, impressions columns
 
-4. DETERMINE ANSWERABILITY
-   Question is ANSWERABLE WITHOUT CLARIFICATION if:
-   - Exactly ONE table clearly matches the user's intent
-   - All necessary filters are specified (date range, location, etc.)
-   - The query is complete and unambiguous
+   User says "revenue by region" → Think: What's needed?
+   ✓ revenue/amount/sales columns + geography/region/location columns
 
-   Question NEEDS CLARIFICATION if:
-   - MULTIPLE tables have matching data (which one to use?)
-   - Missing time period for time-series data
-   - Missing important filters (location, category, etc.)
-   - Query is too vague or ambiguous
+2. BUSINESS LOGIC UNDERSTANDING (Calculate Metrics Intelligently!)
 
-   Question is NOT ANSWERABLE if:
-   - No columns exist that could provide the requested information
-   - The user's request is impossible with available data
+   Common Business Metrics and Their Logic:
 
-5. OUTPUT FORMAT
-   Respond in this EXACT format:
+   • Conversion Rate = (Conversions / Total Visits) × 100
+     Columns needed: conversion_count, total_visits OR purchase_count, visitor_count
 
-   **ANSWERABLE: YES** (if can answer without clarification)
-   **ANSWERABLE: NEEDS_CLARIFICATION** (if answerable but needs more details)
-   **ANSWERABLE: NO** (if not answerable with available data)
+   • Churn Rate = (Customers Lost / Total Customers) × 100
+     Columns needed: churned_customers, total_customers, end_date
 
-   **REASONING:**
-   [Explain your semantic matching logic and what's missing]
+   • Average Order Value = Total Revenue / Number of Orders
+     Columns needed: revenue, order_count
 
-   **MATCHING TABLES AND COLUMNS:**
-   [List all tables and columns that match]
+   • Customer Lifetime Value = Average Order Value × Purchase Frequency × Customer Lifespan
+     Columns needed: revenue, order_count, customer_id, first_purchase_date
 
-   **WHAT'S MISSING:**
-   [What details are not specified: table choice, date range, filters, etc.]
+   • Net Promoter Score (NPS) = % Promoters - % Detractors
+     Columns needed: nps_score OR rating/satisfaction (if 0-10 scale)
 
-   **CLARIFICATION QUESTIONS:**
-   [Specific questions to ask the user. If they say "just proceed", we'll use defaults]
+   IF user asks for a CALCULATED METRIC:
+   - Identify which columns are needed for the calculation
+   - Check if a pre-calculated column exists (conversion_rate column)
+   - If not, identify source columns (conversions, visits)
+   - Explain the calculation logic to the user
 
-AVAILABLE SCHEMAS:
+3. INTELLIGENT COLUMN SELECTION (What Data is ACTUALLY Needed?)
+
+   User: "Show me sentiment for bangalore"
+
+   Your reasoning process:
+   Step 1: What's the goal? → Sentiment analysis for a specific city
+   Step 2: What columns are needed?
+     - Sentiment data: sentiment_score, satisfaction, nps, feedback
+     - Location filter: city, location, region, geography
+     - Context: date, product, category (helpful for insights)
+   Step 3: Which table has ALL these columns?
+   Step 4: Select minimal but sufficient columns
+
+   User: "What's our conversion rate last quarter?"
+
+   Your reasoning:
+   Step 1: Goal? → Calculate conversion rate for Q3/Q4
+   Step 2: Formula? → conversions / total_visitors
+   Step 3: Columns needed:
+     - Numerator: conversion_count, purchase_count, successful_transactions
+     - Denominator: total_visits, visitor_count, session_count
+     - Time filter: date, quarter, period
+   Step 4: Identify which table has these columns
+   Step 5: If missing, ask user OR suggest alternative calculation
+
+4. CONTEXT-AWARE FILTERING (What Filters Make Sense?)
+
+   Think about what filters are NECESSARY vs OPTIONAL:
+
+   Necessary filters (missing = unclear query):
+   - Time range for trends: "revenue last month" needs date
+   - Location for geo-specific: "bangalore sales" needs city filter
+   - Category for segmentation: "mobile phone sales" needs product filter
+
+   Optional filters (can proceed without):
+   - Additional breakdowns: "by region" when already have country
+   - Minor segments: "for premium customers" when total is fine
+
+5. RAG INTEGRATION (Use Business Knowledge!)
+{f'''
+   📚 BUSINESS CONTEXT FROM DOCUMENTATION:
+   {rag_context}
+
+   Use this context to understand:
+   - Column definitions (what nps_score means)
+   - Business metric calculations (how conversion is calculated)
+   - Data relationships (which tables to join)
+   - Business rules (filter criteria, valid ranges)
+''' if rag_context else ""}
+
+═══════════════════════════════════════════════════════════════════════════════
+📊 ANALYSIS OUTPUT FORMAT
+═══════════════════════════════════════════════════════════════════════════════
+
+**ANSWERABLE: YES** (if can answer with available columns)
+**ANSWERABLE: NEEDS_CLARIFICATION** (if need to narrow down or select table)
+**ANSWERABLE: NO** (if truly impossible - no relevant columns exist)
+
+**INTELLIGENT REASONING:**
+[Explain your thought process:
+ - What is user trying to achieve?
+ - Which columns semantically match the intent?
+ - What business logic applies?
+ - What's the calculation formula if needed?]
+
+**SELECTED COLUMNS AND TABLES:**
+Table: [table_name]
+Required columns:
+  - [column_name]: [why this column? what does it provide?]
+  - [column_name]: [purpose in the query]
+
+Optional/context columns:
+  - [column_name]: [adds context but not critical]
+
+**BUSINESS LOGIC APPLIED:**
+[If calculating a metric, explain the formula and which columns map to it]
+Example: "Conversion Rate = conversions / total_visits
+         - conversions → conversion_count column
+         - total_visits → visitor_count column"
+
+**WHAT'S NEEDED FROM USER:**
+[Only ask if TRULY ambiguous - be autonomous when possible!
+ - Multiple valid tables? Ask which one
+ - Missing critical filter? Ask for it
+ - Can make reasonable assumption? DO IT and mention in reasoning]
+
+**CLARIFICATION QUESTIONS (if needed):**
+[Smart, specific questions - not generic "what do you want?"
+ Example: "I found sentiment data in 2 tables:
+          1. pc_sales (product sentiment)
+          2. customer_feedback (overall satisfaction)
+          Which would you like to analyze?"]
+
+═══════════════════════════════════════════════════════════════════════════════
+📁 AVAILABLE SCHEMAS
+═══════════════════════════════════════════════════════════════════════════════
 {schema_info}
 
-USER QUESTION:
+═══════════════════════════════════════════════════════════════════════════════
+❓ USER QUESTION
+═══════════════════════════════════════════════════════════════════════════════
 {user_question}
 
-Now analyze:"""
+═══════════════════════════════════════════════════════════════════════════════
+
+Now analyze with INTELLIGENCE and AUTONOMY. Be smart, reason about business logic, select relevant columns!"""
 
         try:
             response = llm.invoke([
@@ -447,47 +529,151 @@ def create_query_planner_agent(llm: AzureChatOpenAI):
         if len(all_user_messages) > 1 and not use_defaults:
             user_context += f"\n\nAdditional details provided: {latest_user_input}"
 
-        planning_prompt = f"""You are a query planning specialist for Databricks Genie.
+        # Get RAG context for business definitions
+        rag_context = state.get("rag_context", "")
 
-Your task is to create NATURAL, CONVERSATIONAL queries that Genie can understand.
+        planning_prompt = f"""You are an intelligent query planning specialist for Databricks Genie.
 
-IMPORTANT RULES:
-1. Format queries as NATURAL QUESTIONS (not SQL!)
-2. Be specific about table names, filters, and what you want
-3. If user said "just proceed" or provided defaults, make reasonable assumptions
+Your task: Transform schema analysis into SMART, NATURAL queries using BUSINESS LOGIC.
 
-GOOD NATURAL QUERIES:
-- "Show me sentiment data for bangalore from the pc_sales table"
-- "What is the average revenue for orders in October 2025?"
-- "From the PES table, show negative sentiment entries for bangalore in October 2025"
+═══════════════════════════════════════════════════════════════════════════════
+🎯 INTELLIGENT QUERY CONSTRUCTION
+═══════════════════════════════════════════════════════════════════════════════
 
-BAD QUERIES:
-- "From catalog.schema.sales, show sentiment_score, city where city = 'bangalore'" (too SQL-like)
-- "Can you show me sentiment data?" (too vague - missing table/filters)
+1. USE THE COLUMN INTELLIGENCE FROM SCHEMA ANALYSIS
 
-{"USER WANTS DEFAULTS:" if use_defaults else ""}
-{f"The user said '{latest_user_input}' - make reasonable assumptions for missing details" if use_defaults else ""}
+   The schema analysis has already identified:
+   - Which specific columns are needed
+   - What business logic applies
+   - What calculations are required
 
-AVAILABLE TABLES:
-{schema_info}
+   YOUR JOB: Convert this intelligence into natural Genie queries
+
+2. BUSINESS METRIC QUERIES (Be Smart About Calculations!)
+
+   Example: User wants "conversion rate"
+
+   Schema Analysis identified:
+   - Formula: conversions / total_visits
+   - Columns: conversion_count, visitor_count
+   - Table: web_analytics
+
+   YOUR QUERY:
+   "From the web_analytics table, calculate the conversion rate by dividing
+   conversion_count by visitor_count, and show the result as a percentage"
+
+   Example: User wants "NPS score"
+
+   Schema Analysis identified:
+   - Column: nps_score (already calculated)
+   - Filter: city = bangalore
+   - Table: customer_feedback
+
+   YOUR QUERY:
+   "Show me the NPS scores from the customer_feedback table for bangalore"
+
+3. INTELLIGENT COLUMN SELECTION (Use What Analysis Found!)
+
+   Example: User asks "sentiment for bangalore"
+
+   Schema Analysis identified:
+   - sentiment_score column (main metric)
+   - city column (filter)
+   - date column (context)
+   - product column (additional context)
+
+   YOUR QUERY:
+   "From the pc_sales table, show me the sentiment_score for records where
+   city is bangalore. Also include the date and product for context."
+
+   DON'T create vague queries! Use the SPECIFIC columns identified.
+
+4. CALCULATED METRICS (Explain the Math to Genie)
+
+   When schema analysis identifies a calculated metric:
+
+   ✓ "Calculate average order value by dividing total_revenue by order_count"
+   ✓ "Calculate churn rate as (churned_customers / total_customers) * 100"
+   ✓ "Show conversion rate: successful_purchases divided by total_visitors"
+
+   ✗ "Show me the conversion rate" (too vague - Genie might not know the formula)
+
+5. CONTEXT-AWARE FILTERING (Apply Smart Filters)
+
+   Use filters identified in schema analysis:
+
+   - Date ranges: "for October 2025" or "in the last quarter"
+   - Location: "where city is bangalore" or "for the bangalore region"
+   - Categories: "for product category mobile phones"
+   - Conditions: "where sentiment_score is negative" or "rating below 5"
+
+6. RAG-ENHANCED QUERIES (Use Business Definitions!)
+{f'''
+   📚 BUSINESS KNOWLEDGE FROM DOCUMENTATION:
+   {rag_context}
+
+   Use this to:
+   - Understand metric definitions
+   - Know calculation formulas
+   - Apply business rules
+   - Use correct terminology
+''' if rag_context else ""}
+
+═══════════════════════════════════════════════════════════════════════════════
+✅ GOOD vs BAD QUERIES
+═══════════════════════════════════════════════════════════════════════════════
+
+GOOD (Specific, intelligent, uses columns from analysis):
+✓ "From pc_sales, show sentiment_score and city where city = 'bangalore' and
+   date is in October 2025. Include product name for context."
+
+✓ "Calculate conversion rate from web_analytics by dividing conversion_count
+   by visitor_count for Q4 2024. Show as percentage."
+
+✓ "From customer_feedback, show the average NPS score grouped by region
+   for the last 3 months."
+
+BAD (Vague, no column intelligence):
+✗ "Show me sentiment data" (which columns? which table? what filters?)
+✗ "Calculate conversion rate" (what formula? which columns?)
+✗ "SELECT sentiment_score FROM pc_sales WHERE city = 'bangalore'" (too SQL-like!)
+
+═══════════════════════════════════════════════════════════════════════════════
+📥 YOUR INPUTS
+═══════════════════════════════════════════════════════════════════════════════
+
+SCHEMA ANALYSIS (WITH COLUMN INTELLIGENCE):
+{schema_analysis}
 
 USER CONTEXT:
 {user_context}
 
-SCHEMA ANALYSIS:
-{schema_analysis}
+{"USER WANTS DEFAULTS: " + latest_user_input if use_defaults else ""}
 
-Now create natural, conversational queries for Genie. If multiple tables are involved, create separate queries.
-Output in this format:
+═══════════════════════════════════════════════════════════════════════════════
+📤 YOUR OUTPUT
+═══════════════════════════════════════════════════════════════════════════════
+
+Create NATURAL, INTELLIGENT queries that:
+1. Use the SPECIFIC columns identified in schema analysis
+2. Apply business logic and calculations properly
+3. Include smart filters and context
+4. Are conversational but precise
+
+Format:
 
 **QUERY 1:**
-[Natural question for Genie]
+[Natural, intelligent query using specific columns and business logic]
 
 **QUERY 2:**
-[Natural question if needed]
+[Additional query if needed for multi-part questions]
 
-If user requested defaults, choose the most relevant table and reasonable date ranges (e.g., last 3 months).
-"""
+**REASONING:**
+[Briefly explain: What columns are you using? What calculation/filter logic?]
+
+═══════════════════════════════════════════════════════════════════════════════
+
+Now create SMART queries using the column intelligence and business logic from the analysis!"""
 
         try:
             response = llm.invoke([SystemMessage(content=planning_prompt)])
