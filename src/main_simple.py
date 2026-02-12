@@ -91,6 +91,7 @@ def main():
                     "iterations": 0,
 
                     # Workflow tracking (explicit state fields)
+                    "rag_checked": False,
                     "schema_analyzed": False,
                     "query_planned": False,
                     "genie_executed": False,
@@ -100,6 +101,17 @@ def main():
                     "schema_info": "",
                     "formatted_query": "",
                     "final_answer": "",
+
+                    # RAG fields
+                    "rag_context": "",
+                    "rag_answer": "",
+                    "rag_can_answer": False,
+                    "rag_similarity": 0.0,
+
+                    # Caching fields
+                    "cache_checked": False,
+                    "cache_hit": False,
+                    "cached_result": "",
 
                     # Analysis results
                     "is_answerable": False,

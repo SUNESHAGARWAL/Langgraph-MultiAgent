@@ -1,19 +1,23 @@
 """
-Simplified Multi-Agent System - Clean Architecture
-=================================================
+Simplified Multi-Agent System with RAG and Smart Caching
+=========================================================
 
 A streamlined multi-agent orchestrator that:
-1. Reads Unity Catalog schemas
-2. Analyzes questions for answerability
-3. Plans and formats clean queries
-4. Executes via Genie
-5. Synthesizes results
+1. RAG: Answer from documents OR enrich context
+2. Reads Unity Catalog schemas
+3. Analyzes questions for answerability
+4. Plans and formats clean queries
+5. Executes via Genie (with smart caching)
+6. Synthesizes results
 
-NO validation loops - trust the results!
+Features:
+- Dual-purpose RAG (standalone Q&A + context enrichment)
+- Smart SQL caching (semantic similarity)
+- NO validation loops - trust the results!
 
 Author: Claude Code
-Version: 5.0.0-simple
-Date: 2026-02-11
+Version: 5.1.0-rag-caching
+Date: 2026-02-12
 """
 
 import operator
@@ -28,6 +32,12 @@ from databricks_langchain import GenieAgent
 from src.core.config import config
 from src.utils.logging import get_logger
 
+# RAG and Caching imports
+from src.utils.embeddings import initialize_embedding_service, get_embedding_service
+from src.services.rag_store import initialize_rag_store, get_rag_store
+from src.services.smart_cache import initialize_sql_cache, get_sql_cache
+from src.utils.parsers import load_documents_from_directory
+
 logger = get_logger(__name__)
 
 
@@ -41,6 +51,7 @@ class AgentState(TypedDict):
     messages: Annotated[list[BaseMessage], operator.add]
 
     # Workflow stage tracking (explicit boolean flags)
+    rag_checked: bool              # RAG search completed?
     schema_analyzed: bool          # Schema analysis completed?
     query_planned: bool            # Query planning completed?
     genie_executed: bool           # Genie execution completed?
@@ -50,6 +61,17 @@ class AgentState(TypedDict):
     schema_info: str              # Unity Catalog schema info
     formatted_query: str          # Query for Genie
     final_answer: str             # Synthesized answer
+
+    # RAG fields (document-based Q&A + context enrichment)
+    rag_context: str              # RAG context hints for schema/query
+    rag_answer: str               # Direct answer from RAG (standalone mode)
+    rag_can_answer: bool          # RAG can answer without Genie
+    rag_similarity: float         # Best RAG document similarity
+
+    # Caching fields (smart SQL caching)
+    cache_checked: bool           # Cache lookup performed?
+    cache_hit: bool               # Query served from cache?
+    cached_result: str            # Cached result if hit
 
     # Routing control
     next_agent: str               # Next agent to route to
@@ -515,12 +537,14 @@ If user requested defaults, choose the most relevant table and reasonable date r
     return query_planner_node
 
 
-def create_genie_executor_node(workspace_client: WorkspaceClient):
+def create_genie_executor_node(workspace_client: WorkspaceClient, sql_cache=None):
     """
     Agent that:
-    1. Takes formatted queries
-    2. Executes them via Genie
-    3. Returns results
+    1. Checks smart cache for similar queries
+    2. Takes formatted queries
+    3. Executes them via Genie (if cache miss)
+    4. Caches results
+    5. Returns results
     """
 
     # Initialize Genie agent
@@ -544,9 +568,33 @@ def create_genie_executor_node(workspace_client: WorkspaceClient):
                 **state,  # Preserve all existing fields
                 "messages": [AIMessage(content="Error: No query to execute")],
                 "genie_executed": False,
+                "cache_checked": True,
+                "cache_hit": False,
                 "next_agent": "synthesis",
                 "iterations": iterations + 1
             }
+
+        # Check cache first (if enabled)
+        if sql_cache:
+            try:
+                cached_result = sql_cache.get(formatted_query)
+                if cached_result:
+                    logger.info("✓ Cache HIT - returning cached result")
+                    return {
+                        **state,
+                        "messages": [AIMessage(content=f"[FROM CACHE]\n\n{cached_result}")],
+                        "cache_checked": True,
+                        "cache_hit": True,
+                        "cached_result": cached_result,
+                        "genie_executed": True,
+                        "next_agent": "synthesis",
+                        "iterations": iterations + 1
+                    }
+                else:
+                    logger.info("✗ Cache MISS - executing Genie")
+            except Exception as e:
+                logger.warning(f"Cache check failed: {e}")
+
 
         # Parse individual queries
         queries = []
@@ -585,9 +633,19 @@ def create_genie_executor_node(workspace_client: WorkspaceClient):
         # Combine all results
         combined_results = "\n\n".join(results)
 
+        # Cache the result (if caching enabled)
+        if sql_cache:
+            try:
+                sql_cache.set(formatted_query, combined_results)
+                logger.info("✓ Result cached for future queries")
+            except Exception as e:
+                logger.warning(f"Failed to cache result: {e}")
+
         return {
             **state,  # Preserve all existing fields
             "messages": [AIMessage(content=f"Genie Results:\n\n{combined_results}")],
+            "cache_checked": True,
+            "cache_hit": False,
             "genie_executed": True,
             "next_agent": "synthesis",
             "iterations": iterations + 1
@@ -697,6 +755,129 @@ def create_human_node():
 
 
 # ============================================================================
+# RAG AGENT (Document Q&A + Context Enrichment)
+# ============================================================================
+
+def create_rag_node(rag_store, config):
+    """
+    RAG agent with dual-purpose mode:
+    1. Standalone Q&A: Answer questions directly from documents
+    2. Context enrichment: Provide hints to schema/query planners
+    """
+
+    def rag_node(state: AgentState) -> Dict[str, Any]:
+        logger.info("=== RAG Agent ===")
+
+        iterations = state.get("iterations", 0)
+        messages = state["messages"]
+
+        # Get user question
+        user_question = ""
+        for msg in reversed(messages):
+            if isinstance(msg, HumanMessage):
+                user_question = msg.content
+                break
+
+        if not user_question:
+            logger.warning("No user question found for RAG")
+            return {
+                **state,
+                "rag_checked": True,
+                "rag_can_answer": False,
+                "next_agent": "schema",
+                "iterations": iterations + 1
+            }
+
+        # Search RAG store for relevant documents
+        try:
+            results = rag_store.search(
+                query=user_question,
+                top_k=config.rag.top_k,
+                min_similarity=config.rag.min_similarity
+            )
+
+            if not results:
+                logger.info("No relevant documents found in RAG")
+                return {
+                    **state,
+                    "rag_checked": True,
+                    "rag_can_answer": False,
+                    "rag_context": "",
+                    "next_agent": "schema",
+                    "iterations": iterations + 1
+                }
+
+            # Get best result
+            best_result = results[0]
+            best_similarity = best_result.metadata.get("similarity", 0.0)
+
+            logger.info(f"RAG found {len(results)} documents (best similarity: {best_similarity:.3f})")
+
+            # Determine if can answer standalone
+            can_answer_standalone = (
+                config.rag.enable_standalone_qa and
+                best_similarity >= config.rag.standalone_threshold
+            )
+
+            if can_answer_standalone:
+                # Mode 1: Standalone Q&A - Answer directly from documents
+                logger.info(f"✓ RAG answering standalone (similarity: {best_similarity:.3f})")
+
+                # Build answer from top documents
+                answer_parts = [f"Based on the available documentation:\n"]
+                for i, doc in enumerate(results[:3]):
+                    answer_parts.append(f"\n**Source {i+1}** ({doc.metadata.get('filename', 'Unknown')}):")
+                    answer_parts.append(doc.content[:500] + "..." if len(doc.content) > 500 else doc.content)
+
+                rag_answer = "\n".join(answer_parts)
+
+                return {
+                    **state,
+                    "messages": [AIMessage(content=rag_answer)],
+                    "rag_checked": True,
+                    "rag_can_answer": True,
+                    "rag_answer": rag_answer,
+                    "rag_similarity": best_similarity,
+                    "final_answer": rag_answer,
+                    "next_agent": "FINISH",  # Skip SQL/Genie entirely
+                    "iterations": iterations + 1
+                }
+
+            else:
+                # Mode 2: Context Enrichment - Provide hints to schema/query
+                logger.info(f"✓ RAG providing context hints (similarity: {best_similarity:.3f})")
+
+                # Build context from top documents
+                context_parts = ["**RAG Context (from documentation):**\n"]
+                for i, doc in enumerate(results):
+                    context_parts.append(f"- {doc.content[:200]}...")
+
+                rag_context = "\n".join(context_parts)
+
+                return {
+                    **state,
+                    "rag_checked": True,
+                    "rag_can_answer": False,
+                    "rag_context": rag_context,
+                    "rag_similarity": best_similarity,
+                    "next_agent": "schema",  # Proceed to schema with context
+                    "iterations": iterations + 1
+                }
+
+        except Exception as e:
+            logger.error(f"RAG search failed: {e}", exc_info=True)
+            return {
+                **state,
+                "rag_checked": True,
+                "rag_can_answer": False,
+                "next_agent": "schema",
+                "iterations": iterations + 1
+            }
+
+    return rag_node
+
+
+# ============================================================================
 # SUPERVISOR / ROUTER
 # ============================================================================
 
@@ -720,6 +901,8 @@ def create_supervisor_node(llm: AzureChatOpenAI):
         messages = state["messages"]
 
         # Get state tracking fields
+        rag_checked = state.get("rag_checked", False)
+        rag_can_answer = state.get("rag_can_answer", False)
         schema_analyzed = state.get("schema_analyzed", False)
         query_planned = state.get("query_planned", False)
         genie_executed = state.get("genie_executed", False)
@@ -727,13 +910,24 @@ def create_supervisor_node(llm: AzureChatOpenAI):
         needs_clarification = state.get("needs_clarification", False)
 
         logger.info(f"Iteration {iterations}")
-        logger.info(f"State: schema_analyzed={schema_analyzed}, query_planned={query_planned}, "
+        logger.info(f"State: rag_checked={rag_checked}, rag_can_answer={rag_can_answer}, "
+                   f"schema_analyzed={schema_analyzed}, query_planned={query_planned}, "
                    f"genie_executed={genie_executed}, is_answerable={is_answerable}, "
                    f"needs_clarification={needs_clarification}")
 
         # Safety: Force synthesis after 10 iterations
         if iterations >= 10:
             logger.warning("Max iterations reached - forcing synthesis")
+            return {**state, "next_agent": "synthesis"}
+
+        # Check RAG first (if enabled and not checked)
+        if config.rag.enabled and not rag_checked:
+            logger.info("→ Routing to: rag (RAG enabled, not checked yet)")
+            return {**state, "next_agent": "rag"}
+
+        # If RAG answered standalone, go to synthesis
+        if rag_can_answer:
+            logger.info("→ Routing to: synthesis (RAG answered standalone)")
             return {**state, "next_agent": "synthesis"}
 
         # Check if user just provided clarification
@@ -818,13 +1012,71 @@ def create_multi_agent_graph():
     # Initialize schema reader
     schema_reader = UnitySchemaReader(workspace_client)
 
+    # Initialize embedding service (for RAG and caching)
+    embedding_service = None
+    rag_store = None
+    sql_cache = None
+
+    try:
+        embedding_service = initialize_embedding_service(
+            azure_endpoint=config.azure_openai.endpoint,
+            api_key=config.azure_openai.api_key,
+            api_version=config.azure_openai.api_version,
+            deployment_name=config.azure_openai.embedding_deployment,
+            cache_enabled=True
+        )
+        logger.info("✓ Embedding service initialized")
+
+        # Initialize RAG store (if enabled)
+        if config.rag.enabled:
+            rag_store = initialize_rag_store(
+                embedding_service=embedding_service,
+                vector_store_path=config.rag.vector_store_path,
+                chunk_size=config.rag.chunk_size,
+                chunk_overlap=config.rag.chunk_overlap
+            )
+
+            # Load documents if directory exists and has files
+            import os
+            if os.path.exists(config.rag.documents_path) and os.listdir(config.rag.documents_path):
+                try:
+                    documents = load_documents_from_directory(config.rag.documents_path)
+                    if documents:
+                        rag_store.add_documents(documents)
+                        logger.info(f"✓ RAG initialized with {len(documents)} documents")
+                    else:
+                        logger.info("RAG enabled but no documents found")
+                except Exception as e:
+                    logger.warning(f"Failed to load RAG documents: {e}")
+            else:
+                logger.info("RAG enabled but no documents directory found")
+
+        # Initialize SQL cache (if enabled)
+        if config.cache.enabled:
+            sql_cache = initialize_sql_cache(
+                embedding_service=embedding_service,
+                ttl_seconds=config.cache.ttl_seconds,
+                similarity_threshold=config.cache.similarity_threshold,
+                max_entries=config.cache.max_entries
+            )
+            logger.info("✓ Smart SQL cache initialized")
+
+    except Exception as e:
+        logger.warning(f"RAG/Cache initialization failed (continuing without): {e}")
+
     # Create agents
     supervisor_node = create_supervisor_node(llm)
     schema_node = create_schema_analysis_agent(schema_reader, llm)
     query_planner_node = create_query_planner_agent(llm)
-    genie_node = create_genie_executor_node(workspace_client)
+    genie_node = create_genie_executor_node(workspace_client, sql_cache=sql_cache)
     synthesis_node = create_synthesis_agent(llm)
     human_node = create_human_node()
+
+    # Create RAG node (if enabled)
+    rag_node = None
+    if config.rag.enabled and rag_store:
+        rag_node = create_rag_node(rag_store, config)
+        logger.info("✓ RAG node created")
 
     # Build graph
     workflow = StateGraph(AgentState)
@@ -837,21 +1089,31 @@ def create_multi_agent_graph():
     workflow.add_node("synthesis", synthesis_node)
     workflow.add_node("human", human_node)
 
+    # Add RAG node (if enabled)
+    if rag_node:
+        workflow.add_node("rag", rag_node)
+
     # Entry point
     workflow.set_entry_point("supervisor")
 
     # Supervisor routes to agents
+    routing_dict = {
+        "schema": "schema",
+        "query_planner": "query_planner",
+        "genie": "genie",
+        "synthesis": "synthesis",
+        "human": "human",
+        "FINISH": END
+    }
+
+    # Add RAG to routing (if enabled)
+    if rag_node:
+        routing_dict["rag"] = "rag"
+
     workflow.add_conditional_edges(
         "supervisor",
         route_from_supervisor,
-        {
-            "schema": "schema",
-            "query_planner": "query_planner",
-            "genie": "genie",
-            "synthesis": "synthesis",
-            "human": "human",
-            "FINISH": END
-        }
+        routing_dict
     )
 
     # All agents loop back to supervisor (except synthesis which ends)
@@ -860,6 +1122,10 @@ def create_multi_agent_graph():
     workflow.add_edge("genie", "supervisor")
     workflow.add_edge("synthesis", END)
     workflow.add_edge("human", "supervisor")  # Human loops back to supervisor!
+
+    # RAG loops back to supervisor (if enabled)
+    if rag_node:
+        workflow.add_edge("rag", "supervisor")
 
     # Compile with memory and recursion limit
     memory = MemorySaver()
