@@ -56,13 +56,37 @@ class DatabricksConfig(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
-# Unused config classes removed in v5.0 simplification:
-# - AzureStorageConfig (not used in simplified architecture)
-# - RedisConfig (not used in simplified architecture)
-# - CacheConfig (not used in simplified architecture)
-# - DatabaseConfig (not used in simplified architecture)
-# - VectorStoreConfig (not used in simplified architecture)
-# - RAGConfig (not used in simplified architecture)
+class RAGConfig(BaseSettings):
+    """RAG (Retrieval-Augmented Generation) Configuration"""
+
+    enabled: bool = Field(default=False, alias="RAG_ENABLED")
+    documents_path: str = Field(default="./data/documents", alias="RAG_DOCUMENTS_PATH")
+    vector_store_path: str = Field(default="./data/vector_stores/rag_index", alias="RAG_VECTOR_STORE_PATH")
+
+    # Chunking settings
+    chunk_size: int = Field(default=1000, alias="RAG_CHUNK_SIZE")
+    chunk_overlap: int = Field(default=200, alias="RAG_CHUNK_OVERLAP")
+
+    # Search settings
+    top_k: int = Field(default=3, alias="RAG_TOP_K")
+    min_similarity: float = Field(default=0.7, alias="RAG_MIN_SIMILARITY")
+
+    # Standalone Q&A mode
+    enable_standalone_qa: bool = Field(default=True, alias="RAG_ENABLE_STANDALONE_QA")
+    standalone_threshold: float = Field(default=0.85, alias="RAG_STANDALONE_THRESHOLD")
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+
+class CacheConfig(BaseSettings):
+    """Smart SQL Cache Configuration"""
+
+    enabled: bool = Field(default=False, alias="CACHE_ENABLED")
+    ttl_seconds: int = Field(default=3600, alias="CACHE_TTL_SECONDS")
+    similarity_threshold: float = Field(default=0.90, alias="CACHE_SIMILARITY_THRESHOLD")
+    max_entries: int = Field(default=1000, alias="CACHE_MAX_ENTRIES")
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
 class MLflowConfig(BaseSettings):
@@ -145,9 +169,11 @@ class Config:
         if self._initialized:
             return
 
-        # V5.0 Simplified - Only load configs that are actually used
+        # V5.1 - Core + RAG + Caching
         self.azure_openai = AzureOpenAIConfig()
         self.databricks = DatabricksConfig()
+        self.rag = RAGConfig()
+        self.cache = CacheConfig()
         self.mlflow = MLflowConfig()
         self.agent = AgentConfig()
         self.logging = LoggingConfig()
@@ -162,6 +188,14 @@ class Config:
             self.app.session_storage_path,
             "./data/logs",
         ]
+
+        # Add RAG directories if enabled
+        if self.rag.enabled:
+            directories.extend([
+                self.rag.documents_path,
+                self.rag.vector_store_path,
+            ])
+
         for directory in directories:
             os.makedirs(directory, exist_ok=True)
 
