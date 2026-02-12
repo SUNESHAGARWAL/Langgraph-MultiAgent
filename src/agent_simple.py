@@ -166,19 +166,14 @@ def create_schema_analysis_agent(schema_reader: UnitySchemaReader, llm: AzureCha
         iterations = state.get("iterations", 0)
         messages = state["messages"]
 
-        # Get or store original question
-        original_question = state.get("original_question", "")
-        if not original_question:
-            # Extract from latest human message
-            for msg in reversed(messages):
-                if isinstance(msg, HumanMessage):
-                    original_question = msg.content
-                    break
+        # Collect ALL user messages (original + clarifications)
+        all_user_messages = []
+        for msg in messages:
+            if isinstance(msg, HumanMessage):
+                all_user_messages.append(msg.content)
 
-        user_question = original_question
-
-        if not user_question:
-            logger.error("No user question found")
+        if not all_user_messages:
+            logger.error("No user messages found")
             return {
                 **state,  # Preserve all existing fields
                 "next_agent": "human",
@@ -187,6 +182,23 @@ def create_schema_analysis_agent(schema_reader: UnitySchemaReader, llm: AzureCha
                 "schema_analyzed": False,
                 "iterations": iterations + 1
             }
+
+        # Get or store original question
+        original_question = state.get("original_question", "")
+        if not original_question:
+            original_question = all_user_messages[0]
+
+        # Build user context including any clarifications
+        if len(all_user_messages) > 1:
+            # User provided clarification - include both original and clarification
+            user_question = f"""Original question: {original_question}
+
+Additional clarification provided by user: {all_user_messages[-1]}
+
+IMPORTANT: The user has now provided additional details. Re-analyze with this NEW information."""
+        else:
+            # First time asking
+            user_question = original_question
 
         # Read schemas if not already in state
         schema_info = state.get("schema_info", "")
