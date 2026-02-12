@@ -1313,12 +1313,10 @@ def create_multi_agent_graph():
     if rag_node:
         workflow.add_edge("rag", "supervisor")
 
-    # Compile with memory and recursion limit
+    # Compile with memory
+    # Note: Recursion is limited by supervisor's iteration counter (max 10)
     memory = MemorySaver()
-    graph = workflow.compile(
-        checkpointer=memory,
-        recursion_limit=20  # Prevent infinite loops
-    )
+    graph = workflow.compile(checkpointer=memory)
 
     logger.info("✓ Simplified multi-agent system initialized")
 
