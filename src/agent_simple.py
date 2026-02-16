@@ -144,7 +144,9 @@ class UnitySchemaReader:
 
         for table_name in config.databricks.unity_tables:
             try:
-                schema = self.read_table_schema(table_name)
+                # Construct full table name: catalog.schema.table
+                full_table_name = f"{config.databricks.unity_catalog}.{config.databricks.unity_schema}.{table_name}"
+                schema = self.read_table_schema(full_table_name)
                 formatted = self._format_schema_for_llm(schema)
                 all_schemas.append(formatted)
             except Exception as e:
