@@ -29,8 +29,8 @@ def get_llm(temperature: float = None, deployment: str = None) -> AzureChatOpenA
         >>> llm = get_llm(deployment="gpt-4o-mini")  # Use different model
     """
     # Use provided values or fall back to config
-    final_temperature = temperature if temperature is not None else config.azure.temperature
-    final_deployment = deployment if deployment is not None else config.azure.gpt4o_deployment
+    final_temperature = temperature if temperature is not None else config.azure_openai.temperature
+    final_deployment = deployment if deployment is not None else config.azure_openai.gpt4o_deployment
 
     llm = AzureChatOpenAI(
         azure_endpoint=config.azure_openai.endpoint,
@@ -38,7 +38,7 @@ def get_llm(temperature: float = None, deployment: str = None) -> AzureChatOpenA
         api_version=config.azure_openai.api_version,
         azure_deployment=final_deployment,
         temperature=final_temperature,
-        max_tokens=config.azure.max_tokens,
+        max_tokens=config.azure_openai.max_tokens,
     )
 
     return llm
@@ -59,5 +59,5 @@ def get_mini_llm(temperature: float = None) -> AzureChatOpenAI:
     """
     return get_llm(
         temperature=temperature,
-        deployment=config.azure.gpt4o_mini_deployment
+        deployment=config.azure_openai.gpt4o_mini_deployment
     )
